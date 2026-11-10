@@ -252,10 +252,42 @@ class Api:
             {"manifest": manifest, "notes": notes},
             authenticated=True,
         )
+        return self._upload_draft(draft, manifest, folders, control, progress)
+
+    def publisher_manifest(self, mod_id):
+        return self.request(
+            "GET", f"publisher/mods/{quote(mod_id, safe='')}/manifest", authenticated=True
+        )
+
+    def upload_modules(
+        self, mod_id, base_build, changes, removed, folders, notes, control, progress
+    ):
+        if changes is not None:
+            validate_upload_sizes(changes["files"])
+        prepared = self.request(
+            "POST",
+            f"mods/{quote(mod_id, safe='')}/module-drafts",
+            {
+                "base_build": base_build,
+                "manifest": changes,
+                "remove_modules": removed,
+                "notes": notes,
+            },
+            authenticated=True,
+        )
+        validate_manifest(prepared["manifest"])
+        return self._upload_draft(
+            prepared["build"], prepared["manifest"], folders, control, progress
+        )
+
+    def _upload_draft(self, draft, manifest, folders, control, progress):
         if draft["status"] in {"draft", "published"}:
             return draft
         sources = {folder.name: folder for folder in folders}
-        entries = {f["sha256"]: f for f in manifest["files"]}
+        entries = {}
+        for entry in manifest["files"]:
+            if entry["sha256"] not in entries or entry["path"].split("/", 1)[0] in sources:
+                entries[entry["sha256"]] = entry
         unique = list(entries)
         total = sum(f["size"] for f in entries.values())
         completed = 0
@@ -270,8 +302,6 @@ class Api:
             for sha, ticket in tickets.items():
                 control.check()
                 entry = entries[sha]
-                root, rest = entry["path"].split("/", 1)
-                path = sources[root] / rest
 
                 def update(count, base=completed):
                     progress({"state": "Uploading", "done": base + count, "total": total})
@@ -280,6 +310,13 @@ class Api:
                     update(entry["size"])
                     completed += entry["size"]
                     continue
+                root, rest = entry["path"].split("/", 1)
+                if root not in sources:
+                    raise ModError(
+                        f"Stored module files are unavailable: {entry['path']}. "
+                        "Select Change for this module to restore its files."
+                    )
+                path = sources[root] / rest
                 if not path.is_file():
                     raise ModError(f"Source changed since review. Scan again: {entry['path']}")
                 validate_upload_sizes([{"path": entry["path"], "size": path.stat().st_size}])

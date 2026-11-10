@@ -148,8 +148,12 @@ Recommended installation behavior:
 - Avoid changing installed mod files while Bannerlord or its launcher is running.
   Updates can download into staging and wait until both are closed.
 - Record managed files and installed build identities in local SQLite.
-- Recognize existing manual and Workshop installations without silently adopting
-  or replacing them.
+- On installation, reuse an existing module folder when its ID matches the
+  published module. Verify existing files by hash, download only missing/different
+  published files, and preserve unrelated files. Record the resulting installation
+  as managed. A different module ID, another listing's ownership, or linked paths
+  remain conflicts. Adoption uses the same staged replacement and rollback as
+  ordinary updates; automatic discovery alone does not adopt modules.
 - Restrict writes to approved module destinations and reject escaping paths or
   links. Root-folder replacements and publisher-provided install scripts are
   outside the proposed initial package format.
@@ -363,8 +367,21 @@ Use a clear **Review Upload** step before any content is uploaded. This is a
 folder-content confirmation flow; membership payment processing remains outside
 scope.
 
-Uploads accept ordinary readable module folders only. Provide a folder drop area
-and **Open Folder**. ZIPs and other archive inputs are unsupported; there is no
+Opening a publisher listing loads its published modules as cards, with names and
+versions from the server's manifest. **Change** selects a replacement folder for
+one module; **Remove** stages that module's deletion from the next release.
+Unchanged modules retain their stored content without any local folder selection.
+**+ Add module** accepts new modules, with native Windows Shift/Ctrl selection and
+folder drag and drop. **Reset changes** reloads the published release.
+
+The client scans only additions/replacements and previews the complete release.
+The backend independently merges those modules and explicit removals into its own
+manifest, validates the complete result and uploaded SubModule.xml, and checks the
+base release again when publishing. A concurrent publication requires reloading
+and reviewing again. Changes only take effect after Confirm Upload. At least one
+module must remain in a release; deleting the listing uses the admin controls.
+
+Uploads accept ordinary readable module folders only. ZIPs and other archive inputs are unsupported; there is no
 archive extraction step.
 
 The selected folder must itself be a module root with SubModule.xml directly
@@ -430,8 +447,10 @@ Acceptance flow:
    progress, and place the files directly under the intended Modules folders.
 6. Verify installed file hashes and that the official launcher recognizes the
    modules. Use the prominent Start Launcher button.
-7. Confirm that an existing unmanaged installation is recognized as a conflict
-   rather than silently overwritten, and that the publisher's source is intact.
+7. Confirm that installing over matching unmanaged modules reuses verified files,
+   downloads only missing/different published files, preserves unrelated files,
+   and records the modules as managed. Different module IDs and other listings'
+   ownership must remain conflicts. The publisher's source stays intact.
 
 Follow-up acceptance: publish a replacement, including one retaining the same mod
 version, automatically fetch only changed files, apply it when safe, then verify

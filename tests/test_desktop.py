@@ -4,18 +4,26 @@ import os
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
-from PySide6.QtGui import QFontDatabase, QImage
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QColor, QFontDatabase, QImage, QPainter, QPixmap
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from test_modules import module
 
-from signalpoint.api import DEFAULT_API_URL, Api, ApiError
-from signalpoint.desktop import STYLE, MainWindow, PublisherDialog
-from signalpoint.manifest import MAX_UPLOAD_FILE_SIZE
+from signalpoint.api import DEFAULT_API_URL, Api
+from signalpoint.desktop import (
+    STYLE,
+    CardThumbnail,
+    MainWindow,
+    PublisherDialog,
+)
+from signalpoint.manifest import MAX_UPLOAD_FILE_SIZE, scan
 from signalpoint.state import State
 from signalpoint.thumbnails import ThumbnailLoader
 
@@ -40,6 +48,67 @@ def wait(app, condition, timeout=5):
         app.processEvents()
 
 
+def test_publisher_selects_multiple_folders_and_removes_a_selection(app, tmp_path, monkeypatch):
+    class Publisher:
+        base = "http://127.0.0.1/signalpoint"
+        token = ""
+
+        def publisher_manifest(self, mod):
+            return {"build_id": None, "manifest": {"schema": 1, "modules": [], "files": []}}
+
+    paths = [module(tmp_path / name, name) for name in ("Alpha", "Beta", "Gamma", "Omega")]
+    calls = []
+
+    def choose(owner, directory):
+        calls.append((owner, directory))
+        return paths
+
+    monkeypatch.setattr("signalpoint.desktop.choose_folders", choose)
+    dialog = PublisherDialog(Publisher(), None)
+    dialog.show_mods([{"id": "example", "name": "Example"}])
+    dialog.show()
+    wait(app, lambda: dialog.worker is None)
+    dialog.open_folder()
+    assert dialog.paths == paths
+    assert calls == [(int(dialog.winId()), None)]
+    assert dialog.folders.count() == 4
+    # Cancelling the native picker leaves the existing review intact.
+    dialog.manifest = {"reviewed": True}
+    dialog.confirm.setEnabled(True)
+    monkeypatch.setattr("signalpoint.desktop.choose_folders", lambda *_: [])
+    dialog.open_folder()
+    assert dialog.paths == paths and dialog.manifest is not None
+    # Removing a Shift-selected range keeps the remaining row/path in sync and
+    # invalidates the earlier upload review. It does not delete local folders.
+    dialog.manifest = {"reviewed": True}
+    dialog.confirm.setEnabled(True)
+    view = dialog.folders
+    QTest.mouseClick(
+        view.viewport(), Qt.MouseButton.LeftButton, pos=view.visualItemRect(view.item(0)).center()
+    )
+    QTest.mouseClick(
+        view.viewport(),
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ShiftModifier,
+        view.visualItemRect(view.item(2)).center(),
+    )
+    assert len(view.selectedItems()) == 3
+    QTest.mouseClick(
+        view.viewport(),
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ControlModifier,
+        view.visualItemRect(view.item(1)).center(),
+    )
+    assert len(view.selectedItems()) == 2
+    dialog.remove_button.click()
+    assert dialog.paths == [paths[1], paths[3]]
+    assert [view.item(i).text() for i in range(view.count())] == ["Beta", "Omega"]
+    assert dialog.manifest is None and not dialog.confirm.isEnabled()
+    assert all(p.is_dir() for p in paths)
+    dialog.close()
+    app.processEvents()
+
+
 def test_folder_review_and_trusted_publication(app, tmp_path):
     class Publisher:
         base = "http://127.0.0.1/signalpoint"
@@ -48,10 +117,12 @@ def test_folder_review_and_trusted_publication(app, tmp_path):
         def publisher_mods(self):
             return [{"id": "example", "name": "Example"}]
 
-        def manifest(self, mod):
-            raise ApiError(404, "Not yet published")
+        def publisher_manifest(self, mod):
+            return {"build_id": None, "manifest": {"schema": 1, "modules": [], "files": []}}
 
-        def upload(self, mod, manifest, paths, notes, control, progress):
+        def upload_modules(
+            self, mod, base_build, manifest, removed, paths, notes, control, progress
+        ):
             assert mod == "example"
             assert manifest["modules"][0]["version"] == "v1.0.0"
             control.check()
@@ -80,8 +151,75 @@ def test_folder_review_and_trusted_publication(app, tmp_path):
     app.processEvents()
 
 
+def test_publisher_loads_online_modules_and_changes_only_the_chosen_module(
+    app, tmp_path, monkeypatch
+):
+    first = module(tmp_path / "Warlords", "Warlords", "v1.3")
+    second = module(tmp_path / "Armory", "Armory", "v1.8")
+    baseline = scan([first, second])
+
+    class Publisher:
+        base = "http://127.0.0.1/signalpoint"
+        token = "session"
+
+        def publisher_mods(self):
+            return [{"id": "warlords", "name": "Warlords"}]
+
+        def publisher_manifest(self, mod):
+            return {"build_id": "a" * 64, "manifest": baseline}
+
+    dialog = PublisherDialog(Publisher(), None)
+    dialog.show()
+    wait(app, lambda: dialog.worker is None)
+    assert len(dialog.module_rows) == 2 and dialog.paths == []
+    assert all(entry["published"] and entry["source"] is None for entry in dialog.module_rows)
+    card = dialog.folders.itemWidget(dialog.folders.item(0))
+    assert card.name.text() == "Armory" and card.version.text() == "v1.8"
+    replacement = module(tmp_path / "new" / "Armory", "Armory", "v1.9")
+    calls = []
+
+    def choose(owner, directory, *, multiple):
+        calls.append((owner, directory, multiple))
+        return [replacement]
+
+    monkeypatch.setattr("signalpoint.desktop.choose_folders", choose)
+    card.change_button.click()
+    assert calls == [(int(dialog.winId()), None, False)]
+    assert dialog.paths == [replacement]
+    assert dialog.module_rows[1]["source"] is None
+    assert dialog.folders.itemWidget(dialog.folders.item(0)).version.text() == "v1.9"
+    dialog.scan_folders()
+    wait(app, lambda: dialog.worker is None)
+    assert dialog.confirm.isEnabled()
+    assert [m["id"] for m in dialog.changed_manifest["modules"]] == ["Armory"]
+    assert [m["id"] for m in dialog.manifest["modules"]] == ["Armory", "Warlords"]
+    assert "1 modules kept online" in dialog.review.toPlainText()
+    # Cancel and a wrong module ID leave the reviewed selection intact.
+    reviewed = dialog.manifest
+    monkeypatch.setattr("signalpoint.desktop.choose_folders", lambda *_, **__: [])
+    dialog.change_folder("Armory")
+    assert dialog.manifest is reviewed
+    monkeypatch.setattr("signalpoint.desktop.choose_folders", lambda *_, **__: [first])
+    dialog.change_folder("Armory")
+    assert "module ID Armory" in dialog.status.text() and dialog.manifest is reviewed
+    # Remove a published companion, then reset the edit to the server's cards.
+    dialog.folders.itemWidget(dialog.folders.item(1)).remove_button.click()
+    assert dialog.removed_modules == ["Warlords"]
+    assert not dialog.confirm.isEnabled()
+    dialog.reset_button.click()
+    wait(app, lambda: dialog.worker is None)
+    assert len(dialog.module_rows) == 2 and dialog.paths == [] and dialog.removed_modules == []
+    # Removal alone needs no module folders and can still be reviewed.
+    dialog.folders.itemWidget(dialog.folders.item(1)).remove_button.click()
+    dialog.scan_folders()
+    wait(app, lambda: dialog.worker is None)
+    assert dialog.confirm.isEnabled() and dialog.changed_manifest is None
+    assert [m["id"] for m in dialog.manifest["modules"]] == ["Armory"]
+    dialog.close()
+    app.processEvents()
+
+
 def test_failed_size_check_invalidates_an_earlier_checkout(app, tmp_path, monkeypatch):
-    from pathlib import Path
 
     class Publisher:
         base = "http://127.0.0.1/signalpoint"
@@ -90,8 +228,8 @@ def test_failed_size_check_invalidates_an_earlier_checkout(app, tmp_path, monkey
         def publisher_mods(self):
             return [{"id": "example", "name": "Example"}]
 
-        def manifest(self, mod):
-            raise ApiError(404, "Not yet published")
+        def publisher_manifest(self, mod):
+            return {"build_id": None, "manifest": {"schema": 1, "modules": [], "files": []}}
 
     dialog = PublisherDialog(Publisher(), None)
     dialog.show()
@@ -149,11 +287,19 @@ def test_progress_stays_on_card_until_install_complete(app, tmp_path, monkeypatc
     assert not card.bar.isHidden()
     assert card.bar.value() == 1000
     assert "100%" in card.status.text()
+    app.processEvents()
+    bar_top = card.bar.mapTo(card, QPoint(0, 0)).y()
+    assert card.bar.height() >= 10
+    assert bar_top - card.thumbnail.geometry().bottom() >= 12
+    assert card.height() - (bar_top + card.bar.height()) >= 16
+    assert card.cancel.mapTo(card, QPoint(0, card.cancel.height())).y() < bar_top
+    assert card.primary.isHidden()
     window.on_progress({"mod_id": "example", "state": "Verifying", "done": 1000, "total": 1000})
     assert not card.bar.isHidden()
     assert card.status.text() == "Verifying"
     window.on_progress({"mod_id": "example", "state": "Ready", "done": 1000, "total": 1000})
     assert card.bar.isHidden()
+    assert card.progress_area.isHidden() and not card.primary.isHidden()
     assert window.launch.text() == "Start Launcher"
     assert not window.windowIcon().isNull()
     assert window.launch.geometry().right() > window.tabs.geometry().right()
@@ -272,10 +418,16 @@ def test_card_loads_a_verified_thumbnail_asynchronously_and_reuses_disk_cache(
         window.show()
         card = window.cards["example"][0]
         wait(app, lambda: not card.thumbnail.pixmap().isNull())
-        assert 192 <= card.thumbnail.height() <= card.height() < 260
-        window.on_progress({"mod_id": "example", "state": "Downloading", "done": 1, "total": 2})
-        app.processEvents()
-        assert card.bar.geometry().top() >= card.thumbnail.geometry().bottom()
+        assert card.thumbnail.width() == card.thumbnail.height() == 224
+        for phase in ("Checking installed files", "Downloading", "Ready"):
+            window.on_progress({"mod_id": "example", "state": phase, "done": 1, "total": 2})
+            app.processEvents()
+            assert card.thumbnail.width() == card.thumbnail.height() == 224
+            if phase != "Ready":
+                assert (
+                    card.bar.mapTo(card, QPoint(0, 0)).y()
+                    >= card.thumbnail.geometry().bottom() + 12
+                )
         assert len(hits) == 2 and all(auth is None and cookie is None for _, auth, cookie in hits)
         assert cache.read_bytes() == data
         loader = ThumbnailLoader(Api(base), state.directory)
@@ -292,3 +444,21 @@ def test_card_loads_a_verified_thumbnail_asynchronously_and_reuses_disk_cache(
         http.shutdown()
         http.server_close()
         thread.join(timeout=5)
+
+
+def test_square_thumbnail_preserves_the_top_and_bottom_of_portrait_artwork(app):
+    image = QImage(200, 400, QImage.Format.Format_RGB32)
+    image.fill(QColor("green"))
+    painter = QPainter(image)
+    painter.fillRect(0, 0, 200, 64, QColor("red"))
+    painter.fillRect(0, 336, 200, 64, QColor("blue"))
+    painter.end()
+    thumbnail = CardThumbnail()
+    thumbnail.setPixmap(QPixmap.fromImage(image))
+    thumbnail.show()
+    app.processEvents()
+    result = thumbnail.grab().toImage().scaled(224, 224)
+    assert result.pixelColor(112, 5) == QColor("red")
+    assert result.pixelColor(112, 218) == QColor("blue")
+    assert result.pixelColor(5, 112) == QColor("#111123")
+    thumbnail.close()

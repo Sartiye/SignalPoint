@@ -33,8 +33,10 @@ Downloads go directly from object storage; a [SHA-256 checksum](https://mb-cloud
 is available for the current installer. Run a newer installer over an existing
 installation to upgrade while keeping your settings and installed mods.
 
-Version 0.1.1 supports Cloudflare R2 transfers. Install it before using the migrated
-service; earlier installers do not recognize R2 links. Publisher checkout checks
+Version 0.1.2 adds published-module editing, reuse of matching existing modules,
+and clearer card thumbnails and transfer controls. It includes Cloudflare R2
+transfer support; versions older than 0.1.1 do not recognize R2 links.
+Publisher checkout checks
 the 5 GiB limit for each file, including TPAC files, before hashing or uploading.
 A mod may contain multiple files whose combined size exceeds 5 GiB. Completed
 file uploads are reused after interruption; an interrupted R2 file upload restarts
@@ -87,18 +89,30 @@ managed here. There is no per-upload approval step or payment processing.
 In SignalPoint, choose **Publisher**, sign in, select the assigned listing, and
 open **Mod page** to edit its description, choose or remove a thumbnail, then
 **Save mod page**. These changes do not require a module upload or version change.
-Thumbnail previews use a square crop. Players see the image filling the card's
-left side, with details and actions beside it; image fetching is asynchronous
-and cached locally.
+Thumbnail previews keep a square area and show the complete image without cropping.
+Details and actions sit beside it, including Pause and Cancel during downloads.
+A padded progress bar appears beneath the card content. Images load asynchronously
+and are cached locally.
 
-In **Mod files**, drag in the module folder or use **Open Folder**. Each folder must have
-SubModule.xml at its root. Add required companion module folders explicitly.
+In **Mod files**, the listing's published modules load as cards with their current
+names and versions. **Change** opens the standard Windows picker for that module's
+replacement folder. Untouched modules keep their stored files; local copies are
+unnecessary. **Remove** stages a module's removal from the next release.
+**+ Add module** accepts new module folders, including Shift/Ctrl multiple selection
+and drag and drop. **Reset changes** reloads the published modules.
+Each replacement/new folder needs SubModule.xml at its root. Add required companion
+modules explicitly. Removing a card never deletes the publisher's local files.
 Choose **Scan & Review**, inspect versions, dependencies, destinations, and changed
-files, then **Confirm Upload**. Archives are unsupported.
+files, then **Confirm Upload**. Only changed files need uploading, and removals alone
+need no local folders. The server merges against its own current manifest and rejects
+stale edits when another release has been published. Archives are unsupported.
 
 After publishing, Browse is public; the publisher login is not needed to install.
-Initial testing should use a separate test installation. Existing manual or
-Workshop modules are listed as unmanaged and are not silently overwritten.
+Initial testing should use a separate test installation. Existing module folders
+are listed as unmanaged until installation. Installing the matching marketplace
+mod adopts those folders: matching files are reused, missing or different published
+files are updated, and unrelated files are preserved. Module IDs must match, and
+modules already managed by another listing remain protected.
 
 ## Updates and installation
 

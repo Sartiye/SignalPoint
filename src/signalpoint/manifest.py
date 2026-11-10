@@ -179,6 +179,26 @@ def scan(folders: list[Path], progress: Callable[[dict], None] = lambda _: None)
     return result
 
 
+def assemble_modules(previous: dict, changes: dict | None, removed: list[str]) -> dict:
+    """Preview a release; the server independently merges its authoritative copy."""
+    changes = changes or {"modules": [], "files": []}
+    replaced = {module["id"].casefold() for module in changes["modules"]}
+    excluded = replaced | {identifier.casefold() for identifier in removed}
+    retained = [module for module in previous["modules"] if module["id"].casefold() not in excluded]
+    folders = {module["folder"] for module in retained}
+    result = {
+        "schema": 1,
+        "modules": sorted(retained + changes["modules"], key=lambda module: module["folder"]),
+        "files": sorted(
+            [file for file in previous["files"] if file["path"].split("/", 1)[0] in folders]
+            + changes["files"],
+            key=lambda file: file["path"],
+        ),
+    }
+    validate_manifest(result)
+    return result
+
+
 def validate_manifest(manifest: dict) -> None:
     try:
         if manifest["schema"] != 1 or not 1 <= len(manifest["modules"]) <= 20:

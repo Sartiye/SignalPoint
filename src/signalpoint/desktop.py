@@ -30,6 +30,7 @@ from PySide6.QtGui import (
     QPixmap,
 )
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QComboBox,
     QDialog,
@@ -41,6 +42,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -57,9 +59,10 @@ from PySide6.QtWidgets import (
 from signalpoint import __file__ as PACKAGE_FILE
 from signalpoint import __version__
 from signalpoint.api import DEFAULT_API_URL, Api, ApiError, TransferControl
+from signalpoint.folder_picker import choose_folders
 from signalpoint.game import detect_games, installed_modules, validate_game
 from signalpoint.manager import Manager
-from signalpoint.manifest import OFFICIAL, ModError, scan
+from signalpoint.manifest import OFFICIAL, ModError, assemble_modules, read_module, scan
 from signalpoint.state import State
 from signalpoint.thumbnails import ThumbnailLoader
 
@@ -73,6 +76,9 @@ QLabel#brand { font-size: 23px; font-weight: 650; color: #f2effb; }
 QLabel#muted { color: #aaa7bf; }
 QFrame#header { border-bottom: 1px solid #31304b; }
 QFrame#card { background: #1b1b32; border: 1px solid #35334f; border-radius: 4px; }
+QFrame#moduleFolder { background: #1b1b32; border: 1px solid #46405e; border-radius: 4px; }
+QFrame#moduleFolder[selected="true"] { border-color: #ad8bdf; background: #29233e; }
+QLabel#modulePath { color: #aaa7bf; font-size: 11px; }
 QLabel#thumbnail { background: #111123; border: 1px solid #35334f; color: #77738f; }
 QLabel#title { font-size: 17px; font-weight: 600; }
 QPushButton { background: #29283f; border: 1px solid #514b6b; border-radius: 3px;
@@ -93,6 +99,9 @@ QScrollArea { border: none; }
 QProgressBar { border: none; background: #0b0c1a; border-radius: 2px; min-height: 6px;
                max-height: 6px; color: transparent; }
 QProgressBar::chunk { background: #61b8ed; border-radius: 2px; }
+QWidget#cardProgress { background: transparent; }
+QProgressBar#modProgress { min-height: 10px; max-height: 10px; border-radius: 3px; }
+QProgressBar#modProgress::chunk { border-radius: 3px; }
 QScrollBar:vertical { background: #111123; width: 9px; }
 QScrollBar::handle:vertical { background: #51476b; min-height: 32px; border-radius: 3px; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
@@ -147,15 +156,82 @@ class Task(QThread):
             )
 
 
-class FolderList(QListWidget):
+class PublisherModuleCard(QFrame):
+    change = Signal(object)
+    remove = Signal(object)
+
+    def __init__(self, entry):
+        super().__init__()
+        self.setObjectName("moduleFolder")
+        row = QHBoxLayout(self)
+        row.setContentsMargins(14, 10, 14, 10)
+        information = QVBoxLayout()
+        information.setSpacing(4)
+        module, source = entry["module"], entry["source"]
+        self.name = label(module["name"], "title")
+        self.version = label(module["version"], "muted")
+        location = label(
+            "Replacement selected"
+            if source and entry["published"]
+            else "New module"
+            if source
+            else "Published",
+            "modulePath",
+        )
+        if source:
+            location.setToolTip(str(source))
+        for text in (self.name, self.version, location):
+            text.setWordWrap(True)
+            information.addWidget(text)
+        row.addLayout(information, 1)
+        actions = QVBoxLayout()
+        self.change_button = QPushButton("Change")
+        self.change_button.clicked.connect(lambda: self.change.emit(module["id"]))
+        self.remove_button = QPushButton("Remove")
+        self.remove_button.setToolTip(
+            "Remove this module from the next release. Local files are kept."
+        )
+        self.remove_button.clicked.connect(lambda: self.remove.emit(module["id"]))
+        actions.addWidget(self.change_button)
+        actions.addWidget(self.remove_button)
+        row.addLayout(actions)
+
+
+class ModuleList(QListWidget):
     folders = Signal(object)
     invalid = Signal(str)
+    change = Signal(object)
+    remove = Signal(object)
 
     def __init__(self):
         super().__init__()
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setAcceptDrops(True)
-        self.setMinimumHeight(90)
-        self.setMaximumHeight(135)
+        self.setMinimumHeight(245)
+        self.setMaximumHeight(320)
+        self.setSpacing(6)
+        self.itemSelectionChanged.connect(self.update_selection)
+
+    def set_modules(self, entries):
+        self.clear()
+        for entry in entries:
+            identifier = entry["module"]["id"]
+            item = QListWidgetItem(identifier, self)
+            item.setData(Qt.ItemDataRole.UserRole, identifier)
+            card = PublisherModuleCard(entry)
+            card.change.connect(self.change.emit)
+            card.remove.connect(self.remove.emit)
+            item.setSizeHint(card.sizeHint())
+            self.setItemWidget(item, card)
+
+    def update_selection(self):
+        for index in range(self.count()):
+            item = self.item(index)
+            card = self.itemWidget(item)
+            if card is not None:
+                card.setProperty("selected", item.isSelected())
+                card.style().unpolish(card)
+                card.style().polish(card)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -181,6 +257,10 @@ class PublisherDialog(QDialog):
     def __init__(self, api, parent):
         super().__init__(parent)
         self.api, self.paths, self.manifest = api, [], None
+        self.module_rows, self.removed_modules = [], []
+        self.base_build, self.changed_manifest = None, None
+        self.base_manifest = {"schema": 1, "modules": [], "files": []}
+        self.modules_loaded = False
         self.worker, self.control, self.closing = None, TransferControl(), False
         self.setWindowTitle("SignalPoint · Publisher")
         self.resize(800, 760)
@@ -252,19 +332,22 @@ class PublisherDialog(QDialog):
         self.thumbnail_data, self.thumbnail_removed = None, False
         self.page.setEnabled(False)
         body = QVBoxLayout(upload_tab)
-        body.addWidget(
-            label(
-                "Drag module folders below, or use Open Folder. "
-                "Maximum 5 GiB per file, including TPAC files.",
-                "muted",
-            )
+        folder_hint = label(
+            "Published modules load here. Change replaces one; untouched modules stay online. "
+            "Maximum 5 GiB per file, including TPAC files.",
+            "muted",
         )
-        self.folders = FolderList()
+        folder_hint.setWordWrap(True)
+        body.addWidget(folder_hint)
+        self.folders = ModuleList()
         self.folders.folders.connect(self.add_folders)
         self.folders.invalid.connect(self.show_error)
+        self.folders.change.connect(self.change_folder)
+        self.folders.remove.connect(lambda path: self.remove_modules([path]))
         body.addWidget(self.folders)
         buttons = QHBoxLayout()
-        self.open_button = QPushButton("Open Folder")
+        self.open_button = QPushButton("+ Add module")
+        self.open_button.setToolTip("Select one or more module folders using Shift/Ctrl.")
         self.open_button.clicked.connect(self.open_folder)
         self.remove_button = QPushButton("Remove selected")
         self.remove_button.clicked.connect(self.remove_folder)
@@ -273,6 +356,9 @@ class PublisherDialog(QDialog):
         buttons.addWidget(self.open_button)
         buttons.addWidget(self.remove_button)
         buttons.addStretch()
+        self.reset_button = QPushButton("Reset changes")
+        self.reset_button.clicked.connect(self.select_listing)
+        buttons.addWidget(self.reset_button)
         buttons.addWidget(self.scan_button)
         body.addLayout(buttons)
         self.review = QPlainTextEdit()
@@ -325,7 +411,7 @@ class PublisherDialog(QDialog):
         self.status.setText(
             "Edit the description and thumbnail, then Save mod page."
             if index == 1
-            else "Select your module folder."
+            else "Add or change module folders, then Scan & Review."
         )
 
     def run(self, work, success, failure=None):
@@ -338,6 +424,7 @@ class PublisherDialog(QDialog):
         self.open_button.setEnabled(False)
         self.remove_button.setEnabled(False)
         self.folders.setEnabled(False)
+        self.reset_button.setEnabled(False)
         self.listing.setEnabled(False)
         self.page.setEnabled(False)
         self.bar.setRange(0, 0)
@@ -349,6 +436,7 @@ class PublisherDialog(QDialog):
             self.open_button.setEnabled(True)
             self.remove_button.setEnabled(True)
             self.folders.setEnabled(True)
+            self.reset_button.setEnabled(True)
             self.listing.setEnabled(True)
             self.page.setEnabled(bool(self.listing.currentData()))
             self.bar.hide()
@@ -401,32 +489,61 @@ class PublisherDialog(QDialog):
         for mod in mods:
             self.listing.addItem(mod["name"], mod)
         self.status.setText(
-            "Select your module folder."
+            "Add or change module folders, then Scan & Review."
             if mods
             else "No listings assigned. Ask the administrator to assign your mod."
         )
 
     def invalidate(self):
-        self.manifest = None
+        self.manifest, self.changed_manifest = None, None
         self.confirm.setEnabled(False)
+        self.review.clear()
 
-    def select_listing(self):
+    def select_listing(self, _=None, *, published=False):
         self.invalidate()
         mod = self.listing.currentData()
+        self.module_rows, self.paths, self.removed_modules = [], [], []
+        self.base_build = None
+        self.base_manifest = {"schema": 1, "modules": [], "files": []}
+        self.modules_loaded = False
+        self.folders.set_modules([])
+        self.notes.clear()
         self.description.setPlainText(mod.get("description", "") if mod else "")
         self.thumbnail_data, self.thumbnail_removed = None, False
         self.page_thumbnail.clear()
         self.page_thumbnail.setText("No thumbnail")
         self.page.setEnabled(bool(mod))
-        if mod and mod.get("thumbnail") and not self.worker:
+        if not mod:
+            return
 
-            def loaded(data):
-                self.page_thumbnail.setPixmap(QPixmap.fromImage(self.image_from_bytes(data)))
+        def work(_):
+            current = self.api.publisher_manifest(mod["id"])
+            thumbnail = None
+            if mod.get("thumbnail"):
+                try:
+                    thumbnail = self.api.thumbnail(mod["id"], mod["thumbnail"], authenticated=True)
+                except ApiError:
+                    pass
+            return current, thumbnail
 
-            self.run(
-                lambda _: self.api.thumbnail(mod["id"], mod["thumbnail"], authenticated=True),
-                loaded,
+        def loaded(value):
+            current, thumbnail = value
+            self.base_build, self.base_manifest = current["build_id"], current["manifest"]
+            self.module_rows = [
+                {"module": module, "source": None, "published": True}
+                for module in self.base_manifest["modules"]
+            ]
+            self.modules_loaded = True
+            self.folders.set_modules(self.module_rows)
+            if thumbnail:
+                self.page_thumbnail.setPixmap(QPixmap.fromImage(self.image_from_bytes(thumbnail)))
+            self.status.setText(
+                "Published. Players can now install this mod."
+                if published
+                else "Change a published module or Add module, then Scan & Review."
             )
+
+        self.run(work, loaded)
 
     @staticmethod
     def image_from_bytes(data):
@@ -502,30 +619,107 @@ class PublisherDialog(QDialog):
         )
 
     def open_folder(self):
-        path = QFileDialog.getExistingDirectory(self, "Choose module folder")
-        if path:
-            self.add_folders([Path(path)])
+        try:
+            paths = choose_folders(int(self.winId()), self.paths[-1].parent if self.paths else None)
+        except OSError as exc:
+            self.show_error(f"The folder picker could not be opened: {exc}")
+            return
+        if paths:
+            self.add_folders(paths)
 
     def add_folders(self, paths):
-        for path in paths:
-            if path not in self.paths:
-                self.paths.append(path)
-                self.folders.addItem(str(path))
+        if self.worker or not self.modules_loaded:
+            return
+        additions = []
+        included = {entry["module"]["id"].casefold() for entry in self.module_rows}
+        try:
+            for path in paths:
+                path = Path(path).absolute()
+                module = read_module(path)
+                if module["id"].casefold() in included:
+                    raise ModError(f"{module['name']} is already included. Use its Change button.")
+                included.add(module["id"].casefold())
+                additions.append({"module": module, "source": path, "published": False})
+        except (ModError, OSError) as exc:
+            self.show_error(str(exc))
+            return
+        if additions:
+            restored = {entry["module"]["id"].casefold() for entry in additions}
+            self.removed_modules = [
+                key for key in self.removed_modules if key.casefold() not in restored
+            ]
+            self.module_rows.extend(additions)
+            self.refresh_modules()
+
+    def refresh_modules(self):
+        self.paths = [entry["source"] for entry in self.module_rows if entry["source"] is not None]
+        self.folders.set_modules(self.module_rows)
         self.invalidate()
+        self.status.setText(
+            f"{len(self.paths)} new or changed · {len(self.removed_modules)} removed. "
+            "Changes take effect after Confirm Upload."
+        )
+
+    def change_folder(self, identifier):
+        if self.worker or not self.modules_loaded:
+            return
+        entry = next((row for row in self.module_rows if row["module"]["id"] == identifier), None)
+        if entry is None:
+            return
+        try:
+            source = entry["source"]
+            paths = choose_folders(
+                int(self.winId()), source.parent if source else None, multiple=False
+            )
+            if not paths:
+                return
+            if len(paths) != 1:
+                raise ModError("Choose one replacement module folder.")
+            replacement = paths[0].absolute()
+            module = read_module(replacement)
+            if module["id"].casefold() != identifier.casefold():
+                raise ModError(
+                    f"Choose the folder for module ID {identifier}. "
+                    "Use Add module for a different module."
+                )
+        except (ModError, OSError) as exc:
+            self.show_error(str(exc))
+            return
+        entry.update(module=module, source=replacement)
+        self.refresh_modules()
 
     def remove_folder(self):
-        index = self.folders.currentRow()
-        if index >= 0:
-            self.paths.pop(index)
-            self.folders.takeItem(index)
-            self.invalidate()
+        self.remove_modules(
+            [item.data(Qt.ItemDataRole.UserRole) for item in self.folders.selectedItems()]
+        )
+
+    def remove_modules(self, identifiers):
+        if self.worker or not identifiers:
+            return
+        published = {module["id"].casefold() for module in self.base_manifest["modules"]}
+        for row in self.module_rows:
+            identifier = row["module"]["id"]
+            if identifier in identifiers and identifier.casefold() in published:
+                self.removed_modules.append(identifier)
+        self.module_rows = [
+            row for row in self.module_rows if row["module"]["id"] not in identifiers
+        ]
+        self.refresh_modules()
 
     def scan_folders(self):
         mod = self.listing.currentData()
-        if not mod or not self.paths:
-            self.show_error("Choose an assigned listing and at least one module folder.")
+        if not mod or not self.modules_loaded or not self.module_rows:
+            self.show_error("Keep or add at least one module before publishing.")
+            return
+        if not self.paths and not self.removed_modules:
+            self.show_error("Add, change or remove a module before publishing.")
             return
         paths = list(self.paths)
+        expected = {
+            entry["source"].name: entry["module"]["id"].casefold()
+            for entry in self.module_rows
+            if entry["source"] is not None
+        }
         self.invalidate()
         self.review.clear()
 
@@ -534,20 +728,38 @@ class PublisherDialog(QDialog):
                 self.control.check()
                 report(event)
 
-            manifest = scan(paths, update)
-            try:
-                old = self.api.manifest(mod["id"])["manifest"]
-            except ApiError as exc:
-                if exc.status != 404:
-                    raise
-                old = {"files": []}
-            return manifest, old
+            changes = scan(paths, update) if paths else None
+            if changes and any(
+                expected[module["folder"]] != module["id"].casefold()
+                for module in changes["modules"]
+            ):
+                raise ModError(
+                    "A selected module ID changed. Use Change to select its folder again."
+                )
+            manifest = assemble_modules(self.base_manifest, changes, self.removed_modules)
+            return manifest, changes
 
         def reviewed(value):
-            manifest, old = value
-            self.manifest = manifest
+            manifest, changes = value
+            old = self.base_manifest
+            self.manifest, self.changed_manifest = manifest, changes
+            if changes:
+                metadata = {module["id"].casefold(): module for module in changes["modules"]}
+                for entry in self.module_rows:
+                    entry["module"] = metadata.get(
+                        entry["module"]["id"].casefold(), entry["module"]
+                    )
+                self.folders.set_modules(self.module_rows)
             included = {m["id"].casefold() for m in manifest["modules"]}
-            lines = ["REVIEW UPLOAD", "", mod["name"], ""]
+            unchanged = len(self.module_rows) - len(paths)
+            lines = [
+                "REVIEW UPLOAD",
+                "",
+                mod["name"],
+                f"{unchanged} modules kept online · {len(paths)} new or changed · "
+                f"{len(self.removed_modules)} removed",
+                "",
+            ]
             for module in manifest["modules"]:
                 lines += [
                     f"{module['name']}  {module['version']}",
@@ -601,18 +813,26 @@ class PublisherDialog(QDialog):
     def upload(self):
         if not self.manifest:
             return
-        mod, manifest, paths, notes = (
+        mod, paths, notes = (
             self.listing.currentData(),
-            self.manifest,
             list(self.paths),
             self.notes.toPlainText(),
         )
 
         def work(report):
-            return self.api.upload(mod["id"], manifest, paths, notes, self.control, report)
+            return self.api.upload_modules(
+                mod["id"],
+                self.base_build,
+                self.changed_manifest,
+                list(self.removed_modules),
+                paths,
+                notes,
+                self.control,
+                report,
+            )
 
         def done(value):
-            self.invalidate()
+            self.select_listing(published=True)
             self.status.setText("Published. Players can now install this mod.")
             self.published.emit()
 
@@ -635,15 +855,14 @@ class PublisherDialog(QDialog):
 
 
 class CardThumbnail(QLabel):
-    """Fill the card's left edge without stretching the publisher's artwork."""
+    """Keep a square image area and show the publisher's entire artwork."""
 
     def __init__(self):
         super().__init__("No thumbnail")
         self.setObjectName("thumbnail")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setFixedWidth(224)
-        self.setMinimumHeight(192)
-        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Ignored)
+        self.setFixedSize(224, 224)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
     def paintEvent(self, event):
         image = self.pixmap()
@@ -653,10 +872,14 @@ class CardThumbnail(QLabel):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor("#111123"))
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        scale = max(self.width() / image.width(), self.height() / image.height())
-        width, height = int(self.width() / scale), int(self.height() / scale)
-        source = QRect((image.width() - width) // 2, (image.height() - height) // 2, width, height)
-        painter.drawPixmap(self.rect(), image, source)
+        fitted = image.size().scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio)
+        target = QRect(
+            (self.width() - fitted.width()) // 2,
+            (self.height() - fitted.height()) // 2,
+            fitted.width(),
+            fitted.height(),
+        )
+        painter.drawPixmap(target, image, image.rect())
 
 
 class ModCard(QFrame):
@@ -674,7 +897,7 @@ class ModCard(QFrame):
         image = parent.thumbnails.request(mod)
         if image is not None:
             self.thumbnail.setPixmap(image)
-        row.addWidget(self.thumbnail)
+        row.addWidget(self.thumbnail, 0, Qt.AlignmentFlag.AlignTop)
         information = QVBoxLayout()
         information.setContentsMargins(20, 16, 16, 16)
         information.setSpacing(7)
@@ -701,22 +924,27 @@ class ModCard(QFrame):
         information.addWidget(self.status)
         row.addLayout(information, 1)
         self.bar = QProgressBar()
+        self.bar.setObjectName("modProgress")
         self.bar.hide()
-        bottom = QHBoxLayout()
-        bottom.addStretch()
+        self.progress_area = QWidget()
+        self.progress_area.setObjectName("cardProgress")
+        progress_layout = QVBoxLayout(self.progress_area)
+        progress_layout.setContentsMargins(16, 12, 16, 16)
+        progress_layout.addWidget(self.bar)
+        self.progress_area.hide()
         self.pause = QPushButton("Pause")
         self.pause.clicked.connect(parent.pause)
         self.pause.hide()
-        bottom.addWidget(self.pause)
         self.cancel = QPushButton("Cancel")
         self.cancel.clicked.connect(parent.cancel)
         self.cancel.hide()
-        bottom.addWidget(self.cancel)
         self.details = QPushButton("Details / Reports")
         self.details.clicked.connect(lambda: parent.details(mod))
         actions = QVBoxLayout()
         actions.setContentsMargins(0, 16, 16, 16)
         actions.setSpacing(6)
+        actions.addWidget(self.pause)
+        actions.addWidget(self.cancel)
         actions.addWidget(self.primary)
         actions.addWidget(self.details)
         actions.addStretch()
@@ -730,8 +958,7 @@ class ModCard(QFrame):
         actions.addLayout(maintenance)
         row.addLayout(actions)
         body.addLayout(row)
-        body.addWidget(self.bar)
-        body.addLayout(bottom)
+        body.addWidget(self.progress_area)
         self.fit_height()
 
     def fit_height(self):
@@ -747,6 +974,7 @@ class ModCard(QFrame):
             )
             self.subtitle.setText(versions)
         self.primary.setText("Installed" if installed else "Install")
+        self.primary.setVisible(not active)
         self.primary.setEnabled(not installed and not busy)
         if not installed and event and event["state"] == "Failed":
             self.primary.setText("Retry")
@@ -758,6 +986,7 @@ class ModCard(QFrame):
         if event:
             total, done = event.get("total", 0), event.get("done", 0)
             self.bar.setVisible(bool(active))
+            self.progress_area.setVisible(bool(active))
             self.bar.setRange(0, 1000 if total else 0)
             if total:
                 self.bar.setValue(min(1000, int(done / total * 1000)))
@@ -768,6 +997,7 @@ class ModCard(QFrame):
             )
         else:
             self.bar.hide()
+            self.progress_area.hide()
             self.pause.hide()
             self.cancel.hide()
             self.status.setText("Installed" if installed else size(self.mod.get("size", 0)))

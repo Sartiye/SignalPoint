@@ -173,6 +173,8 @@ class Manager:
             all_folders = old_folders | new_folders
             if len({f.casefold() for f in all_folders}) != len(all_folders):
                 raise ModError("Publisher changed module-folder casing; keep it consistent.")
+            adopted_folders = set()
+            installed_modules = bannerlord.installed_modules(self.game)
             for module in manifest["modules"]:
                 for receipt in installs.values():
                     if receipt["mod_id"] != mod_id and any(
@@ -185,34 +187,66 @@ class Manager:
                 if is_link(target):
                     raise ModError("A module destination is a link.")
                 if target.exists() and module["folder"] not in old_folders:
-                    raise ModError(f"{module['folder']} already exists as an unmanaged module.")
-                for installed in bannerlord.installed_modules(self.game):
+                    actual = read_module(target)
+                    if actual["id"].casefold() != module["id"].casefold():
+                        raise ModError(
+                            f"{module['folder']} contains a different module ({actual['id']})."
+                        )
+                    adopted_folders.add(module["folder"])
+                for installed in installed_modules:
                     if (
                         installed["id"].casefold() == module["id"].casefold()
                         and installed["folder"] not in old_folders
+                        and not (
+                            module["folder"] in adopted_folders
+                            and installed["folder"].casefold() == module["folder"].casefold()
+                        )
                     ):
                         raise ModError(
                             f"Module {module['id']} is already installed outside this mod."
                         )
             old_files = {f["path"]: f for f in old["files"]}
-            verified_old = set()
+            adopted_files = {
+                entry["path"]: entry
+                for entry in manifest["files"]
+                if entry["path"].split("/", 1)[0] in adopted_folders
+            }
+            verified = {}
             progress({"state": "Checking installed files", "done": 0, "total": 0})
             for path, entry in old_files.items():
                 control.check()
                 source = self.modules / path
                 if is_link(source) or any(is_link(p) for p in source.parents if p != self.game):
                     raise ModError("A managed path has become a link.")
-                if source.is_file() and hashes(source)[0] == entry["sha256"]:
-                    verified_old.add(path)
+                if (
+                    source.is_file()
+                    and source.stat().st_size == entry["size"]
+                    and hashes(source, lambda _: control.check())[0] == entry["sha256"]
+                ):
+                    verified[path] = entry["sha256"]
                 elif source.exists() and not repair:
                     raise ModError(
                         f"Locally modified file: {path}. Use Repair to replace managed edits."
                     )
+            for path, entry in adopted_files.items():
+                control.check()
+                source = self.modules / path
+                if is_link(source) or any(is_link(p) for p in source.parents if p != self.game):
+                    raise ModError("An existing module path contains a link.")
+                if (
+                    source.is_file()
+                    and source.stat().st_size == entry["size"]
+                    and hashes(source, lambda _: control.check())[0] == entry["sha256"]
+                ):
+                    verified[path] = entry["sha256"]
             needed = []
             for entry in manifest["files"]:
-                old_entry = old_files.get(entry["path"])
-                if not (entry["path"] in verified_old and old_entry["sha256"] == entry["sha256"]):
-                    if entry["path"] not in old_files and (self.modules / entry["path"]).exists():
+                if verified.get(entry["path"]) != entry["sha256"]:
+                    if (
+                        entry["path"] not in old_files
+                        and entry["path"] not in adopted_files
+                        and (self.modules / entry["path"]).exists()
+                    ):
                         raise ModError(f"An unrelated file occupies {entry['path']}.")
                     needed.append(entry)
             # Downloads occur before the short filesystem transaction, including while
@@ -252,7 +286,7 @@ class Manager:
                         copy_tree(self.modules / folder, target)
                     else:
                         target.mkdir(parents=True)
-                for entry in old["files"]:
+                for entry in (old_files | adopted_files).values():
                     target = directory / "new" / entry["path"]
                     if target.is_file():
                         target.unlink()
@@ -264,9 +298,11 @@ class Manager:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     if target.exists():
                         raise ModError(f"Destination conflict: {entry['path']}")
-                    old_entry = old_files.get(entry["path"])
-                    if entry["path"] in verified_old and old_entry["sha256"] == entry["sha256"]:
-                        os.link(self.modules / entry["path"], target)
+                    if verified.get(entry["path"]) == entry["sha256"]:
+                        try:
+                            os.link(self.modules / entry["path"], target)
+                        except OSError:
+                            shutil.copy2(self.modules / entry["path"], target)
                     else:
                         source = self.cache / (entry["sha256"] + ".part")
                         if hashes(source)[0] != entry["sha256"]:
@@ -274,7 +310,10 @@ class Manager:
                         shutil.copy2(source, target)
                 for entry in manifest["files"]:
                     control.check()
-                    if hashes(directory / "new" / entry["path"])[0] != entry["sha256"]:
+                    if (
+                        hashes(directory / "new" / entry["path"], lambda _: control.check())[0]
+                        != entry["sha256"]
+                    ):
                         raise ModError(f"File changed during preparation: {entry['path']}. Retry.")
                 for module in manifest["modules"]:
                     actual = read_module(directory / "new" / module["folder"])
