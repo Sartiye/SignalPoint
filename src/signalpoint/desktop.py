@@ -252,7 +252,13 @@ class PublisherDialog(QDialog):
         self.thumbnail_data, self.thumbnail_removed = None, False
         self.page.setEnabled(False)
         body = QVBoxLayout(upload_tab)
-        body.addWidget(label("Drag module folders below, or use Open Folder.", "muted"))
+        body.addWidget(
+            label(
+                "Drag module folders below, or use Open Folder. "
+                "Maximum 5 GiB per file, including TPAC files.",
+                "muted",
+            )
+        )
         self.folders = FolderList()
         self.folders.folders.connect(self.add_folders)
         self.folders.invalid.connect(self.show_error)
@@ -322,7 +328,7 @@ class PublisherDialog(QDialog):
             else "Select your module folder."
         )
 
-    def run(self, work, success):
+    def run(self, work, success, failure=None):
         if self.worker:
             return
         self.control = TransferControl()
@@ -358,6 +364,8 @@ class PublisherDialog(QDialog):
         def failed(message):
             finish()
             self.show_error(message)
+            if failure:
+                failure(message)
             if not self.api.token:
                 self.login_box.show()
 
@@ -518,6 +526,8 @@ class PublisherDialog(QDialog):
             self.show_error("Choose an assigned listing and at least one module folder.")
             return
         paths = list(self.paths)
+        self.invalidate()
+        self.review.clear()
 
         def work(report):
             def update(event):
@@ -561,6 +571,9 @@ class PublisherDialog(QDialog):
             removed = set(previous) - set(current)
             dlls = [f["path"] for f in manifest["files"] if f["path"].lower().endswith(".dll")]
             lines += [
+                "File-size check: passed (maximum 5 GiB per file, including TPAC files).",
+                f"Largest file: {max(manifest['files'], key=lambda f: f['size'])['path']} "
+                f"({size(max(f['size'] for f in manifest['files']))})",
                 f"Files: {len(current):,} · Installed size: "
                 f"{size(sum(f['size'] for f in current.values()))}",
                 f"Changed/new: {len(changed):,} · Removed: {len(removed):,}",
@@ -583,7 +596,7 @@ class PublisherDialog(QDialog):
             self.confirm.setEnabled(True)
             self.status.setText("Review the module folders and content, then Confirm Upload.")
 
-        self.run(work, reviewed)
+        self.run(work, reviewed, self.review.setPlainText)
 
     def upload(self):
         if not self.manifest:

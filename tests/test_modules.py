@@ -1,10 +1,57 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from signalpoint.game import detect_epic, detect_xbox, find_launcher, validate_game
-from signalpoint.manifest import ModError, fingerprint, read_module, scan
+from signalpoint.manifest import (
+    MAX_UPLOAD_FILE_SIZE,
+    ModError,
+    fingerprint,
+    read_module,
+    scan,
+    validate_upload_sizes,
+)
+
+
+def test_upload_size_boundary_is_per_file():
+    validate_upload_sizes([{"path": "Example/exact.tpac", "size": MAX_UPLOAD_FILE_SIZE}])
+    validate_upload_sizes(
+        [
+            {"path": "Example/first.tpac", "size": 3 * 1024**3},
+            {"path": "Example/second.tpac", "size": 3 * 1024**3},
+        ]
+    )
+    with pytest.raises(ModError, match=r"huge\.tpac") as error:
+        validate_upload_sizes([{"path": "Example/huge.tpac", "size": MAX_UPLOAD_FILE_SIZE + 1}])
+    assert "5,368,709,121 bytes" in str(error.value)
+
+
+def test_oversized_tpac_is_rejected_before_any_file_is_hashed(tmp_path, monkeypatch):
+    from signalpoint import manifest
+
+    folder = module(tmp_path / "Example")
+    asset = folder / "huge.tpac"
+    asset.write_bytes(b"small test fixture")
+    actual_stat = Path.stat
+
+    def fake_stat(path, *args, **kwargs):
+        result = actual_stat(path, *args, **kwargs)
+        if path == asset:
+            values = list(result)
+            values[6] = MAX_UPLOAD_FILE_SIZE + 1
+            return os.stat_result(values)
+        return result
+
+    monkeypatch.setattr(Path, "stat", fake_stat)
+
+    def forbidden_hash(*args, **kwargs):
+        raise AssertionError("Scan must check file sizes before hashing any file")
+
+    monkeypatch.setattr(manifest, "hashes", forbidden_hash)
+    with pytest.raises(ModError, match=r"huge\.tpac"):
+        scan([folder])
 
 
 def module(path: Path, identifier="Example", version="v1.0.0"):

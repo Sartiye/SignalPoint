@@ -29,9 +29,16 @@ Get the latest installer from the [SignalPoint website](https://mb-cloudflare.ey
 or its [download link](https://mb-cloudflare.ey.r.appspot.com/signalpoint/download).
 Installers and checksums are also published in [GitHub Releases](https://github.com/Sartiye/SignalPoint/releases).
 The website lists current mods and their publisher artwork. Players need no account.
-Downloads go directly from Cloud Storage; a [SHA-256 checksum](https://mb-cloudflare.ey.r.appspot.com/signalpoint/download/checksum)
+Downloads go directly from object storage; a [SHA-256 checksum](https://mb-cloudflare.ey.r.appspot.com/signalpoint/download/checksum)
 is available for the current installer. Run a newer installer over an existing
 installation to upgrade while keeping your settings and installed mods.
+
+Version 0.1.1 supports Cloudflare R2 transfers. Install it before using the migrated
+service; earlier installers do not recognize R2 links. Publisher checkout checks
+the 5 GiB limit for each file, including TPAC files, before hashing or uploading.
+A mod may contain multiple files whose combined size exceeds 5 GiB. Completed
+file uploads are reused after interruption; an interrupted R2 file upload restarts
+that file. Player downloads can resume with HTTP Range requests.
 
 ## Run from source
 

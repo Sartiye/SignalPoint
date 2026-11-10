@@ -1,6 +1,7 @@
 """HTTP-only client. API credentials are never sent to object-storage endpoints."""
 
 import hashlib
+import re
 import threading
 import time
 from pathlib import Path
@@ -8,7 +9,7 @@ from urllib.parse import quote, urljoin, urlsplit
 
 import httpx
 
-from signalpoint.manifest import CHUNK, ModError, hashes, validate_manifest
+from signalpoint.manifest import CHUNK, ModError, hashes, validate_manifest, validate_upload_sizes
 
 DEFAULT_API_URL = "https://mb-cloudflare.ey.r.appspot.com/signalpoint"
 
@@ -68,7 +69,11 @@ class Api:
         self._tickets = {}
 
     def request(self, method, path, value=None, *, authenticated=False, content=None):
-        headers = {"Cache-Control": "no-cache", "Accept": "application/json"}
+        headers = {
+            "Cache-Control": "no-cache",
+            "Accept": "application/json",
+            "X-SignalPoint-Transfers": "gcs,r2",
+        }
         if authenticated:
             if not self.token:
                 raise ModError("Sign in as a publisher first.")
@@ -141,10 +146,19 @@ class Api:
         google = parsed.hostname == "storage.googleapis.com" or (parsed.hostname or "").endswith(
             ".storage.googleapis.com"
         )
+        r2 = bool(
+            re.fullmatch(
+                r"[0-9a-f]{32}(?:\.eu)?\.r2\.cloudflarestorage\.com", parsed.hostname or ""
+            )
+        )
+        try:
+            r2 = r2 and parsed.port in {None, 443}
+        except ValueError as exc:
+            raise ModError("The server returned an unsupported file-transfer destination.") from exc
         if (
             parsed.username
             or parsed.fragment
-            or (origin != self.origin and not (google and parsed.scheme == "https"))
+            or (origin != self.origin and not ((google or r2) and parsed.scheme == "https"))
         ):
             raise ModError("The server returned an unsupported file-transfer destination.")
         return url
@@ -231,6 +245,7 @@ class Api:
         raise ModError("Download authorization expired. Retry the operation.")
 
     def upload(self, mod_id, manifest, folders, notes, control, progress):
+        validate_upload_sizes(manifest["files"])
         draft = self.request(
             "POST",
             f"mods/{quote(mod_id, safe='')}/drafts",
@@ -265,7 +280,10 @@ class Api:
                     update(entry["size"])
                     completed += entry["size"]
                     continue
-                if not path.is_file() or hashes(path) != (sha, entry["md5"]):
+                if not path.is_file():
+                    raise ModError(f"Source changed since review. Scan again: {entry['path']}")
+                validate_upload_sizes([{"path": entry["path"], "size": path.stat().st_size}])
+                if hashes(path) != (sha, entry["md5"]):
                     raise ModError(f"Source changed since review. Scan again: {entry['path']}")
                 url = self.transfer_url(ticket["url"])
                 if ticket["mode"] == "resumable":
@@ -292,7 +310,9 @@ class Api:
                         )
                     except httpx.HTTPError as exc:
                         raise ModError("Upload interrupted. Retry the reviewed upload.") from exc
-                    if not response.is_success:
+                    if not response.is_success and not (
+                        ticket["mode"] == "s3-put" and response.status_code == 412
+                    ):
                         raise ModError(
                             f"Upload failed (HTTP {response.status_code}). Rescan and retry."
                         )

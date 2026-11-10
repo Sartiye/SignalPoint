@@ -15,6 +15,7 @@ from test_modules import module
 
 from signalpoint.api import DEFAULT_API_URL, Api, ApiError
 from signalpoint.desktop import STYLE, MainWindow, PublisherDialog
+from signalpoint.manifest import MAX_UPLOAD_FILE_SIZE
 from signalpoint.state import State
 from signalpoint.thumbnails import ThumbnailLoader
 
@@ -75,6 +76,50 @@ def test_folder_review_and_trusted_publication(app, tmp_path):
     assert published == [True]
     assert dialog.status.text().startswith("Published")
     assert not dialog.confirm.isEnabled()
+    dialog.close()
+    app.processEvents()
+
+
+def test_failed_size_check_invalidates_an_earlier_checkout(app, tmp_path, monkeypatch):
+    from pathlib import Path
+
+    class Publisher:
+        base = "http://127.0.0.1/signalpoint"
+        token = "test-session"
+
+        def publisher_mods(self):
+            return [{"id": "example", "name": "Example"}]
+
+        def manifest(self, mod):
+            raise ApiError(404, "Not yet published")
+
+    dialog = PublisherDialog(Publisher(), None)
+    dialog.show()
+    wait(app, lambda: dialog.worker is None)
+    folder = module(tmp_path / "Example")
+    asset = folder / "huge.tpac"
+    asset.write_bytes(b"fixture")
+    dialog.add_folders([folder])
+    dialog.scan_folders()
+    wait(app, lambda: dialog.worker is None)
+    assert dialog.confirm.isEnabled()
+    assert "File-size check: passed" in dialog.review.toPlainText()
+    original_stat = Path.stat
+
+    def fake_stat(path, *args, **kwargs):
+        result = original_stat(path, *args, **kwargs)
+        if path == asset:
+            values = list(result)
+            values[6] = MAX_UPLOAD_FILE_SIZE + 1
+            return os.stat_result(values)
+        return result
+
+    monkeypatch.setattr(Path, "stat", fake_stat)
+    dialog.scan_folders()
+    wait(app, lambda: dialog.worker is None)
+    assert not dialog.confirm.isEnabled() and dialog.manifest is None
+    assert "huge.tpac" in dialog.review.toPlainText()
+    assert "5 GiB" in dialog.status.text()
     dialog.close()
     app.processEvents()
 

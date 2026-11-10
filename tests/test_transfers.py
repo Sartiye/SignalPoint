@@ -55,6 +55,66 @@ def test_transfer_destinations_restricted_and_bad_ranges_rejected(tmp_path):
     assert api.transfer_url("https://storage.googleapis.com/bucket/file").startswith("https://")
 
 
+@pytest.mark.parametrize("region", ["", ".eu"])
+def test_r2_transfer_urls_are_limited_to_real_s3_endpoints(region):
+    api = Api("https://example.com/signalpoint")
+    valid = (
+        f"https://{'a' * 32}{region}.r2.cloudflarestorage.com/signalpoint/file?X-Amz-Signature=test"
+    )
+    assert api.transfer_url(valid) == valid
+    for invalid in (
+        valid.replace("https://", "http://"),
+        valid.replace(".com/", ".com.attacker.example/"),
+        valid.replace("https://", "https://user:password@"),
+        valid.replace(".com/", ".com:8080/"),
+        valid.replace("a" * 32, "not-an-account"),
+        valid + "#fragment",
+    ):
+        with pytest.raises(ModError, match="destination"):
+            api.transfer_url(invalid)
+
+
+def test_signed_r2_download_resumes_without_publisher_authorization(tmp_path):
+    content = b"verified R2 module content"
+    entry = {
+        "path": "Example/file",
+        "size": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "md5": base64.b64encode(hashlib.md5(content, usedforsecurity=False).digest()).decode(),
+    }
+
+    def handler(request):
+        assert "authorization" not in request.headers
+        if request.url.path.endswith("/downloads"):
+            return httpx.Response(
+                200,
+                json={
+                    entry["sha256"]: {
+                        "url": f"https://{'a' * 32}.eu.r2.cloudflarestorage.com/bucket/object",
+                        "headers": {},
+                    }
+                },
+            )
+        assert request.headers["range"] == "bytes=5-"
+        return httpx.Response(
+            206,
+            content=content[5:],
+            headers={
+                "Content-Range": f"bytes 5-{len(content) - 1}/{len(content)}",
+            },
+        )
+
+    api = Api(
+        "https://example.com/signalpoint",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    api.token = "publisher-token-must-stay-private"
+    target = tmp_path / "partial"
+    target.write_bytes(content[:5])
+    api.download("build", entry, target, TransferControl(), lambda _: None)
+    assert target.read_bytes() == content
+
+
 def test_launcher_uses_its_binary_directory(tmp_path, monkeypatch):
     from test_modules import game
 

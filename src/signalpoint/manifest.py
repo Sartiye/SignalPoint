@@ -23,10 +23,25 @@ OFFICIAL = {
 }
 RESERVED = re.compile(r"^(CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\.|$)", re.I)
 CHUNK = 1024 * 1024
+MAX_UPLOAD_FILE_SIZE = 5 * 1024**3
 
 
 class ModError(Exception):
     """An actionable error that can be presented to the user."""
+
+
+def validate_upload_sizes(files):
+    oversized = [entry for entry in files if entry["size"] > MAX_UPLOAD_FILE_SIZE]
+    if oversized:
+        lines = ["Upload blocked: files exceed the 5 GiB per-file limit."]
+        lines.extend(
+            f"{entry['path']}: {entry['size'] / 1024**3:.2f} GiB ({entry['size']:,} bytes)"
+            for entry in oversized[:20]
+        )
+        if len(oversized) > 20:
+            lines.append(f"And {len(oversized) - 20} more oversized files.")
+        lines.append("Maximum per file: 5 GiB (5,368,709,120 bytes), including TPAC files.")
+        raise ModError("\n".join(lines))
 
 
 def safe_path(value: str) -> str:
@@ -145,6 +160,7 @@ def scan(folders: list[Path], progress: Callable[[dict], None] = lambda _: None)
                 paths.append((relative, path, path.stat()))
     if len(paths) > 20000:
         raise ModError("A build may contain at most 20,000 files.")
+    validate_upload_sizes([{"path": relative, "size": stat.st_size} for relative, _, stat in paths])
     total, done, files = sum(stat.st_size for _, _, stat in paths), 0, []
 
     def tick(count):
