@@ -5,14 +5,29 @@ an account, install them directly into the game's Modules folder, and keep them
 updated. Trusted publishers upload readable module folders through the desktop
 app. Successful validated uploads publish directly.
 
-The desktop source is public for inspection. The API and administration panel
+The desktop source is [public on GitHub](https://github.com/Sartiye/SignalPoint)
+under the [MIT license](LICENSE). The API and administration panel
 live in the separate private MBCloudflare backend. This client contains no Google
 Cloud credentials and does not import the backend package.
+
+The project is ready for early public testing. Steam launch integration and the
+installer have been tested locally; Epic and Xbox PC discovery are implemented,
+but launching with those actual store installations still needs player testing.
+Report reproducible client problems through [GitHub Issues](https://github.com/Sartiye/SignalPoint/issues).
+Send credentials, account issues, and security reports privately to
+[andach.elmaskaya@gmail.com](mailto:andach.elmaskaya@gmail.com).
+
+The MIT license covers the SignalPoint client and its source. Bundled dependencies
+retain their own licenses, included in the distribution's `licenses` folder.
+Marketplace mods retain their publishers' licenses. Use of the hosted marketplace
+is covered by the [Terms of Service](https://mb-cloudflare.ey.r.appspot.com/signalpoint/terms/)
+and [Privacy Policy](https://mb-cloudflare.ey.r.appspot.com/signalpoint/privacy/).
 
 ## Download for Windows
 
 Get the latest installer from the [SignalPoint website](https://mb-cloudflare.ey.r.appspot.com/signalpoint/)
 or its [download link](https://mb-cloudflare.ey.r.appspot.com/signalpoint/download).
+Installers and checksums are also published in [GitHub Releases](https://github.com/Sartiye/SignalPoint/releases).
 The website lists current mods and their publisher artwork. Players need no account.
 Downloads go directly from Cloud Storage; a [SHA-256 checksum](https://mb-cloudflare.ey.r.appspot.com/signalpoint/download/checksum)
 is available for the current installer. Run a newer installer over an existing

@@ -75,6 +75,7 @@ def main():
         "_internal/python313.dll",
         "_internal/PySide6/Qt6Core.dll",
         "licenses/Python.txt",
+        "LICENSE.txt",
     )
     if any(not (bundle / name).is_file() for name in required):
         raise SystemExit("Build the desktop bundle first: scripts/build.ps1")

@@ -6,10 +6,17 @@ build-backend = "setuptools.build_meta"
 name = "signalpoint"
 version = "0.1.0"
 description = "A straightforward Bannerlord mod manager"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
   "httpx>=0.28,<1", "defusedxml>=0.7,<1", "psutil>=7,<8", "filelock>=3.20,<4",
 ]
+
+[project.urls]
+Homepage = "https://mb-cloudflare.ey.r.appspot.com/signalpoint/"
+Repository = "https://github.com/Sartiye/SignalPoint"
+Issues = "https://github.com/Sartiye/SignalPoint/issues"
 
 [project.optional-dependencies]
 desktop = ["PySide6-Essentials>=6.10,<7"]

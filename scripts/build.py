@@ -130,6 +130,7 @@ def main():
         licenses.mkdir(parents=True, exist_ok=True)
         shutil.copy2(python_license, licenses / "Python.txt")
     shutil.copy2(ROOT / "README.md", output / "README.txt")
+    shutil.copy2(ROOT / "LICENSE", output / "LICENSE.txt")
     shutil.copy2(ROOT / "src" / "signalpoint" / "assets" / "signalpoint.ico", output / "icon.ico")
     subprocess.run(
         [str(output / "SignalPoint.exe"), "--smoke-test"],
