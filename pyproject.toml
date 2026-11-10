@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "signalpoint"
+version = "0.1.0"
+description = "A straightforward Bannerlord mod manager"
+requires-python = ">=3.13"
+dependencies = [
+  "httpx>=0.28,<1", "defusedxml>=0.7,<1", "psutil>=7,<8", "filelock>=3.20,<4",
+]
+
+[project.optional-dependencies]
+desktop = ["PySide6-Essentials>=6.10,<7"]
+dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
+build = ["PyInstaller>=6.12,<7"]
+
+[project.gui-scripts]
+signalpoint = "signalpoint.desktop:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+signalpoint = ["assets/*.png", "assets/*.ico"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
