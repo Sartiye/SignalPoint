@@ -1,5 +1,6 @@
 """HTTP-only client. API credentials are never sent to object-storage endpoints."""
 
+import hashlib
 import threading
 import time
 from pathlib import Path
@@ -66,15 +67,18 @@ class Api:
         self.token = ""
         self._tickets = {}
 
-    def request(self, method, path, value=None, *, authenticated=False):
+    def request(self, method, path, value=None, *, authenticated=False, content=None):
         headers = {"Cache-Control": "no-cache", "Accept": "application/json"}
         if authenticated:
             if not self.token:
                 raise ModError("Sign in as a publisher first.")
             headers["Authorization"] = "Bearer " + self.token
+        payload = {"json": value} if content is None else {"content": content}
+        if content is not None:
+            headers["Content-Type"] = "image/png"
         try:
             response = self.http.request(
-                method, self.base + "/api/v1/" + path.lstrip("/"), json=value, headers=headers
+                method, self.base + "/api/v1/" + path.lstrip("/"), headers=headers, **payload
             )
         except httpx.HTTPError as exc:
             raise ModError(
@@ -103,6 +107,32 @@ class Api:
 
     def publisher_mods(self):
         return self.request("GET", "publisher/mods", authenticated=True)["mods"]
+
+    def update_page(self, mod_id, description, thumbnail=None, *, remove_thumbnail=False):
+        path = "publisher/mods/" + quote(mod_id, safe="")
+        mod = self.request("PATCH", path, {"description": description}, authenticated=True)
+        if thumbnail is not None:
+            mod = self.request("PUT", path + "/thumbnail", authenticated=True, content=thumbnail)
+        elif remove_thumbnail:
+            mod = self.request("DELETE", path + "/thumbnail", authenticated=True)
+        return mod
+
+    def thumbnail(self, mod_id, metadata, *, authenticated=False):
+        path = f"mods/{quote(mod_id, safe='')}/thumbnail/{quote(metadata['id'], safe='')}"
+        ticket = self.request("GET", path, authenticated=authenticated)
+        data = bytearray()
+        with self.http.stream(
+            "GET", self.transfer_url(ticket["url"]), headers=ticket.get("headers", {}), timeout=15
+        ) as response:
+            if response.status_code != 200:
+                raise ModError("Thumbnail could not be downloaded.")
+            for block in response.iter_bytes():
+                data.extend(block)
+                if len(data) > 1024**2:
+                    raise ModError("Thumbnail exceeds the image size limit.")
+        if hashlib.sha256(data).hexdigest() != metadata["sha256"]:
+            raise ModError("Thumbnail failed verification.")
+        return bytes(data)
 
     def transfer_url(self, value):
         url = urljoin(self.origin + "/", value)

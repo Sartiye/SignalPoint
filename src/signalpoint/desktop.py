@@ -6,8 +6,29 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QLockFile, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QFont, QFontDatabase, QIcon
+from PySide6.QtCore import (
+    QBuffer,
+    QByteArray,
+    QEvent,
+    QIODevice,
+    QLockFile,
+    QRect,
+    Qt,
+    QThread,
+    QTimer,
+    QUrl,
+    Signal,
+)
+from PySide6.QtGui import (
+    QColor,
+    QDesktopServices,
+    QFont,
+    QFontDatabase,
+    QIcon,
+    QImageReader,
+    QPainter,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -26,7 +47,9 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QTabBar,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -38,6 +61,7 @@ from signalpoint.game import detect_games, installed_modules, validate_game
 from signalpoint.manager import Manager
 from signalpoint.manifest import OFFICIAL, ModError, scan
 from signalpoint.state import State
+from signalpoint.thumbnails import ThumbnailLoader
 
 ASSETS = Path(PACKAGE_FILE).parent / "assets"
 
@@ -49,6 +73,7 @@ QLabel#brand { font-size: 23px; font-weight: 650; color: #f2effb; }
 QLabel#muted { color: #aaa7bf; }
 QFrame#header { border-bottom: 1px solid #31304b; }
 QFrame#card { background: #1b1b32; border: 1px solid #35334f; border-radius: 4px; }
+QLabel#thumbnail { background: #111123; border: 1px solid #35334f; color: #77738f; }
 QLabel#title { font-size: 17px; font-weight: 600; }
 QPushButton { background: #29283f; border: 1px solid #514b6b; border-radius: 3px;
               padding: 7px 14px; min-height: 19px; }
@@ -186,9 +211,47 @@ class PublisherDialog(QDialog):
         row = QHBoxLayout()
         row.addWidget(label("Listing"))
         self.listing = QComboBox()
-        self.listing.currentIndexChanged.connect(self.invalidate)
+        self.listing.currentIndexChanged.connect(self.select_listing)
         row.addWidget(self.listing, 1)
         body.addLayout(row)
+        self.tabs = QTabWidget()
+        body.addWidget(self.tabs, 1)
+        upload_tab = QWidget()
+        self.tabs.addTab(upload_tab, "Mod files")
+        self.page = QWidget()
+        self.tabs.addTab(self.page, "Mod page")
+        page = QVBoxLayout(self.page)
+        image_row = QHBoxLayout()
+        self.page_thumbnail = label("No thumbnail", "thumbnail")
+        self.page_thumbnail.setFixedSize(128, 128)
+        self.page_thumbnail.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.page_thumbnail.setScaledContents(True)
+        image_row.addWidget(self.page_thumbnail)
+        image_actions = QVBoxLayout()
+        choose_image = QPushButton("Choose thumbnail")
+        choose_image.clicked.connect(self.choose_thumbnail)
+        clear_image = QPushButton("Remove thumbnail")
+        clear_image.clicked.connect(self.clear_thumbnail)
+        image_actions.addWidget(choose_image)
+        image_actions.addWidget(clear_image)
+        image_actions.addWidget(label("PNG, JPEG or WebP · square crop", "muted"))
+        image_actions.addStretch()
+        image_row.addLayout(image_actions)
+        image_row.addStretch()
+        page.addLayout(image_row)
+        page.addWidget(label("Description"))
+        self.description = QPlainTextEdit()
+        self.description.setPlaceholderText(
+            "Tell players about your mod, requirements and features."
+        )
+        page.addWidget(self.description, 1)
+        self.save_page_button = QPushButton("Save mod page")
+        self.save_page_button.setObjectName("primary")
+        self.save_page_button.clicked.connect(self.save_page)
+        page.addWidget(self.save_page_button)
+        self.thumbnail_data, self.thumbnail_removed = None, False
+        self.page.setEnabled(False)
+        body = QVBoxLayout(upload_tab)
         body.addWidget(label("Drag module folders below, or use Open Folder.", "muted"))
         self.folders = FolderList()
         self.folders.folders.connect(self.add_folders)
@@ -242,12 +305,22 @@ class PublisherDialog(QDialog):
         self.close_button = QPushButton("Close")
         self.close_button.clicked.connect(self.reject)
         layout.addWidget(self.close_button, alignment=Qt.AlignmentFlag.AlignRight)
+        self.tabs.currentChanged.connect(self.page_tab_changed)
         if self.api.token:
             self.login_box.hide()
             self.run(lambda _: self.api.publisher_mods(), self.show_mods)
 
     def show_error(self, message):
         self.status.setText(message)
+
+    def page_tab_changed(self, index):
+        if self.worker or not self.listing.currentData():
+            return
+        self.status.setText(
+            "Edit the description and thumbnail, then Save mod page."
+            if index == 1
+            else "Select your module folder."
+        )
 
     def run(self, work, success):
         if self.worker:
@@ -260,6 +333,7 @@ class PublisherDialog(QDialog):
         self.remove_button.setEnabled(False)
         self.folders.setEnabled(False)
         self.listing.setEnabled(False)
+        self.page.setEnabled(False)
         self.bar.setRange(0, 0)
         self.bar.show()
 
@@ -270,6 +344,7 @@ class PublisherDialog(QDialog):
             self.remove_button.setEnabled(True)
             self.folders.setEnabled(True)
             self.listing.setEnabled(True)
+            self.page.setEnabled(bool(self.listing.currentData()))
             self.bar.hide()
             self.confirm.setEnabled(self.manifest is not None)
             if self.closing:
@@ -326,6 +401,97 @@ class PublisherDialog(QDialog):
     def invalidate(self):
         self.manifest = None
         self.confirm.setEnabled(False)
+
+    def select_listing(self):
+        self.invalidate()
+        mod = self.listing.currentData()
+        self.description.setPlainText(mod.get("description", "") if mod else "")
+        self.thumbnail_data, self.thumbnail_removed = None, False
+        self.page_thumbnail.clear()
+        self.page_thumbnail.setText("No thumbnail")
+        self.page.setEnabled(bool(mod))
+        if mod and mod.get("thumbnail") and not self.worker:
+
+            def loaded(data):
+                self.page_thumbnail.setPixmap(QPixmap.fromImage(self.image_from_bytes(data)))
+
+            self.run(
+                lambda _: self.api.thumbnail(mod["id"], mod["thumbnail"], authenticated=True),
+                loaded,
+            )
+
+    @staticmethod
+    def image_from_bytes(data):
+        from PySide6.QtGui import QImage
+
+        return QImage.fromData(data, "PNG")
+
+    def choose_thumbnail(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose mod thumbnail", "", "Images (*.png *.jpg *.jpeg *.webp)"
+        )
+        if path:
+            self.set_thumbnail(Path(path))
+
+    def set_thumbnail(self, path):
+        try:
+            if path.stat().st_size > 32 * 1024**2:
+                raise ModError("Choose an image smaller than 32 MiB.")
+            reader = QImageReader(str(path))
+            reader.setAutoTransform(True)
+            dimensions = reader.size()
+            if dimensions.width() * dimensions.height() > 32 * 1024**2:
+                raise ModError("Choose an image smaller than 32 megapixels.")
+            image = reader.read()
+            if image.isNull():
+                raise ModError("Choose a valid PNG, JPEG or WebP image.")
+            image = image.scaled(
+                384,
+                384,
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            image = image.copy((image.width() - 384) // 2, (image.height() - 384) // 2, 384, 384)
+            data = QByteArray()
+            buffer = QBuffer(data)
+            buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+            if not image.save(buffer, "PNG"):
+                raise ModError("Thumbnail could not be prepared.")
+            buffer.close()
+            self.thumbnail_data, self.thumbnail_removed = bytes(data), False
+            self.page_thumbnail.setPixmap(QPixmap.fromImage(image))
+        except (ModError, OSError) as exc:
+            self.show_error(str(exc))
+
+    def clear_thumbnail(self):
+        self.thumbnail_data, self.thumbnail_removed = None, True
+        self.page_thumbnail.clear()
+        self.page_thumbnail.setText("No thumbnail")
+
+    def save_page(self):
+        mod = self.listing.currentData()
+        if not mod or self.worker:
+            return
+        description = self.description.toPlainText()
+        if len(description) > 10000:
+            self.show_error("Description must be 10,000 characters or fewer.")
+            return
+        thumbnail, removed = self.thumbnail_data, self.thumbnail_removed
+
+        def saved(updated):
+            self.listing.blockSignals(True)
+            self.listing.setItemData(self.listing.currentIndex(), updated)
+            self.listing.blockSignals(False)
+            self.thumbnail_data, self.thumbnail_removed = None, False
+            self.status.setText("Mod page saved. No module upload or version change was needed.")
+            self.published.emit()
+
+        self.run(
+            lambda _: self.api.update_page(
+                mod["id"], description, thumbnail, remove_thumbnail=removed
+            ),
+            saved,
+        )
 
     def open_folder(self):
         path = QFileDialog.getExistingDirectory(self, "Choose module folder")
@@ -455,35 +621,76 @@ class PublisherDialog(QDialog):
             super().closeEvent(event)
 
 
+class CardThumbnail(QLabel):
+    """Fill the card's left edge without stretching the publisher's artwork."""
+
+    def __init__(self):
+        super().__init__("No thumbnail")
+        self.setObjectName("thumbnail")
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setFixedWidth(224)
+        self.setMinimumHeight(192)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Ignored)
+
+    def paintEvent(self, event):
+        image = self.pixmap()
+        if image.isNull():
+            super().paintEvent(event)
+            return
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#111123"))
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        scale = max(self.width() / image.width(), self.height() / image.height())
+        width, height = int(self.width() / scale), int(self.height() / scale)
+        source = QRect((image.width() - width) // 2, (image.height() - height) // 2, width, height)
+        painter.drawPixmap(self.rect(), image, source)
+
+
 class ModCard(QFrame):
     def __init__(self, mod, parent):
         super().__init__()
         self.mod, self.window = mod, parent
         self.setObjectName("card")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         body = QVBoxLayout(self)
-        body.setContentsMargins(18, 15, 18, 13)
-        body.setSpacing(8)
-        top = QHBoxLayout()
-        top.addWidget(label(mod["name"], "title"), 1)
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+        row = QHBoxLayout()
+        row.setSpacing(0)
+        self.thumbnail = CardThumbnail()
+        image = parent.thumbnails.request(mod)
+        if image is not None:
+            self.thumbnail.setPixmap(image)
+        row.addWidget(self.thumbnail)
+        information = QVBoxLayout()
+        information.setContentsMargins(20, 16, 16, 16)
+        information.setSpacing(7)
+        title = label(mod["name"], "title")
+        title.setWordWrap(True)
+        information.addWidget(title)
         self.primary = QPushButton("Install")
         self.primary.clicked.connect(lambda: parent.install(mod["id"]))
-        top.addWidget(self.primary)
-        body.addLayout(top)
         versions = " · ".join(f"{m['name']} {m['version']}" for m in mod.get("modules", []))
         self.subtitle = label(versions, "muted")
         self.subtitle.setWordWrap(True)
-        body.addWidget(self.subtitle)
+        information.addWidget(self.subtitle)
         if mod.get("description"):
-            description = label(mod["description"][:350])
+            description = label(
+                mod["description"][:260].replace("\n", " ")
+                + ("…" if len(mod["description"]) > 260 else "")
+            )
             description.setWordWrap(True)
-            body.addWidget(description)
-        self.bar = QProgressBar()
-        self.bar.hide()
-        body.addWidget(self.bar)
-        bottom = QHBoxLayout()
+            description.setMaximumHeight(60)
+            information.addWidget(description)
+        information.addStretch()
         self.status = label("", "muted")
         self.status.setWordWrap(True)
-        bottom.addWidget(self.status, 1)
+        information.addWidget(self.status)
+        row.addLayout(information, 1)
+        self.bar = QProgressBar()
+        self.bar.hide()
+        bottom = QHBoxLayout()
+        bottom.addStretch()
         self.pause = QPushButton("Pause")
         self.pause.clicked.connect(parent.pause)
         self.pause.hide()
@@ -494,14 +701,29 @@ class ModCard(QFrame):
         bottom.addWidget(self.cancel)
         self.details = QPushButton("Details / Reports")
         self.details.clicked.connect(lambda: parent.details(mod))
-        bottom.addWidget(self.details)
+        actions = QVBoxLayout()
+        actions.setContentsMargins(0, 16, 16, 16)
+        actions.setSpacing(6)
+        actions.addWidget(self.primary)
+        actions.addWidget(self.details)
+        actions.addStretch()
+        maintenance = QHBoxLayout()
         self.repair = QPushButton("Repair")
         self.repair.clicked.connect(lambda: parent.install(mod["id"], repair=True))
-        bottom.addWidget(self.repair)
+        maintenance.addWidget(self.repair)
         self.remove = QPushButton("Uninstall")
         self.remove.clicked.connect(lambda: parent.uninstall(mod["id"]))
-        bottom.addWidget(self.remove)
+        maintenance.addWidget(self.remove)
+        actions.addLayout(maintenance)
+        row.addLayout(actions)
+        body.addLayout(row)
+        body.addWidget(self.bar)
         body.addLayout(bottom)
+        self.fit_height()
+
+    def fit_height(self):
+        self.layout().invalidate()
+        self.setMinimumHeight(self.layout().minimumSize().height() + 2)
 
     def update_state(self, receipt, event, busy):
         active = event and event["state"] not in {"Ready", "Failed", "Cancelled"}
@@ -539,6 +761,7 @@ class ModCard(QFrame):
         self.pause.setText(
             "Resume" if self.window.control and self.window.control.paused else "Pause"
         )
+        self.fit_height()
 
 
 class MainWindow(QMainWindow):
@@ -546,6 +769,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.state = state
         self.api = Api(api_url or DEFAULT_API_URL)
+        self.thumbnails = ThumbnailLoader(self.api, state.directory, self)
+        self.thumbnails.ready.connect(self.thumbnail_ready)
         self.game = Path(game or state.get("game")) if game or state.get("game") else None
         source = state.get("catalog_source", state.get("api", self.api.base))
         self.catalog = state.get("catalog", []) if source == self.api.base else []
@@ -783,7 +1008,7 @@ class MainWindow(QMainWindow):
             lambda report: self.manager().launch(
                 store_hint=hint, progress=report, control=self.control
             ),
-            lambda _: self.status.setText("Bannerlord launcher started."),
+            lambda _: self.status.setText("Bannerlord launch requested."),
         )
 
     def install(self, mod_id, *, repair=False):
@@ -893,6 +1118,11 @@ class MainWindow(QMainWindow):
         for mod_id, cards in self.cards.items():
             for card in cards:
                 card.update_state(receipts.get(mod_id), self.events.get(mod_id), bool(self.active))
+
+    def thumbnail_ready(self, mod_id, identity, image):
+        for card in self.cards.get(mod_id, []):
+            if (card.mod.get("thumbnail") or {}).get("id") == identity:
+                card.thumbnail.setPixmap(image)
 
     def render(self):
         if not hasattr(self, "scroll"):
@@ -1087,6 +1317,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(100, self.close)
             event.ignore()
             return
+        self.thumbnails.stop()
         super().closeEvent(event)
 
 
@@ -1138,8 +1369,14 @@ def main():
     window = MainWindow(state, api_url=args.api_url, game=args.game)
     window.show()
     if args.screenshot:
+        capture_deadline = time.monotonic() + 20
 
         def capture():
+            if time.monotonic() < capture_deadline and (
+                window.active or window.thumbnails.active or window.thumbnails.queue
+            ):
+                QTimer.singleShot(100, capture)
+                return
             args.screenshot.parent.mkdir(parents=True, exist_ok=True)
             window.grab().save(str(args.screenshot))
             window.close()

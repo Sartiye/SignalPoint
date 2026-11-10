@@ -243,8 +243,20 @@ def start_launcher(game: Path, *, store_hint=None, progress=lambda _: None, cont
     game = validate_game(game)
     if running():
         raise ModError("Bannerlord or its launcher is already running.")
+    store = stores.identify(game, store_hint)
+    if store == stores.STEAM:
+        if control:
+            control.check()
+        progress({"state": "Starting Bannerlord through Steam…"})
+        try:
+            stores.open_client(store, game_id=APP_ID)
+        except OSError as exc:
+            raise ModError(
+                "Could not launch Bannerlord through Steam. Open Steam and retry."
+            ) from exc
+        return
     launcher = find_launcher(game)
-    stores.ensure_open(stores.identify(game, store_hint), progress=progress, control=control)
+    stores.ensure_open(store, progress=progress, control=control)
     if control:
         control.check()
     if running():

@@ -1,17 +1,22 @@
+import hashlib
+import json
 import os
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
-from PySide6.QtGui import QFontDatabase
+from PySide6.QtGui import QFontDatabase, QImage
 from PySide6.QtWidgets import QApplication
 from test_modules import module
 
-from signalpoint.api import DEFAULT_API_URL, ApiError
+from signalpoint.api import DEFAULT_API_URL, Api, ApiError
 from signalpoint.desktop import STYLE, MainWindow, PublisherDialog
 from signalpoint.state import State
+from signalpoint.thumbnails import ThumbnailLoader
 
 
 @pytest.fixture(scope="module")
@@ -125,3 +130,120 @@ def test_hosted_default_replaces_saved_development_address(app, tmp_path, monkey
     assert development.api.base == local
     development.close()
     app.processEvents()
+
+
+def test_publisher_can_save_a_mod_page_without_uploading_module_files(app, tmp_path):
+    class Publisher:
+        base = DEFAULT_API_URL
+        token = "test-session"
+
+        def publisher_mods(self):
+            return [{"id": "example", "name": "Example", "description": "Original"}]
+
+        def update_page(self, mod_id, description, thumbnail, *, remove_thumbnail):
+            assert mod_id == "example" and description == "New description"
+            assert thumbnail.startswith(b"\x89PNG")
+            assert not remove_thumbnail
+            return {"id": mod_id, "name": "Example", "description": description}
+
+    dialog = PublisherDialog(Publisher(), None)
+    dialog.show()
+    wait(app, lambda: dialog.worker is None)
+    dialog.tabs.setCurrentIndex(1)
+    dialog.description.setPlainText("New description")
+    image = QImage(720, 480, QImage.Format.Format_RGB32)
+    image.fill(0x334477)
+    path = tmp_path / "thumbnail.png"
+    image.save(str(path))
+    dialog.set_thumbnail(path)
+    assert not dialog.page_thumbnail.pixmap().isNull()
+    dialog.save_page()
+    wait(app, lambda: dialog.worker is None)
+    assert dialog.listing.currentData()["description"] == "New description"
+    assert "Mod page saved" in dialog.status.text()
+    assert dialog.manifest is None
+    dialog.close()
+    app.processEvents()
+
+
+def test_card_loads_a_verified_thumbnail_asynchronously_and_reuses_disk_cache(
+    app, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(MainWindow, "startup", lambda self: None)
+    monkeypatch.setattr(MainWindow, "background_sync", lambda self: None)
+    image = QImage(384, 384, QImage.Format.Format_RGB32)
+    image.fill(0x334477)
+    path = tmp_path / "image.png"
+    image.save(str(path))
+    data = path.read_bytes()
+    sha = hashlib.sha256(data).hexdigest()
+    hits = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            hits.append((self.path, self.headers.get("Authorization"), self.headers.get("Cookie")))
+            if self.path == "/thumbnail.png":
+                content, kind = data, "image/png"
+            else:
+                content = json.dumps(
+                    {
+                        "url": origin + "/thumbnail.png",
+                        "headers": {
+                            "Authorization": "must-not-forward",
+                            "Cookie": "must-not-forward",
+                        },
+                    }
+                ).encode()
+                kind = "application/json"
+            self.send_response(200)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+
+        def log_message(self, *args):
+            pass
+
+    http = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=http.serve_forever, daemon=True)
+    thread.start()
+    origin = f"http://127.0.0.1:{http.server_port}"
+    base = origin + "/signalpoint"
+    state = State(tmp_path / "state")
+    mod = {
+        "id": "example",
+        "name": "Example",
+        "description": "Description beside the image.",
+        "modules": [],
+        "thumbnail": {"id": "a" * 32, "sha256": sha, "size": len(data)},
+    }
+    state.set("catalog", [mod])
+    cache = state.directory / "thumbnails" / (sha + ".png")
+    cache.parent.mkdir()
+    cache.write_bytes(b"corrupt cached image")
+    window = MainWindow(state, api_url=base)
+    try:
+        window.tabs.setCurrentIndex(1)
+        window.show()
+        card = window.cards["example"][0]
+        wait(app, lambda: not card.thumbnail.pixmap().isNull())
+        assert 192 <= card.thumbnail.height() <= card.height() < 260
+        window.on_progress({"mod_id": "example", "state": "Downloading", "done": 1, "total": 2})
+        app.processEvents()
+        assert card.bar.geometry().top() >= card.thumbnail.geometry().bottom()
+        assert len(hits) == 2 and all(auth is None and cookie is None for _, auth, cookie in hits)
+        assert cache.read_bytes() == data
+        loader = ThumbnailLoader(Api(base), state.directory)
+        assert loader.request(mod) is not None
+        assert len(hits) == 2
+        assert (
+            loader.request({"id": "example", "thumbnail": {"id": "../bad", "sha256": "../bad"}})
+            is None
+        )
+        loader.stop()
+    finally:
+        window.close()
+        app.processEvents()
+        http.shutdown()
+        http.server_close()
+        thread.join(timeout=5)

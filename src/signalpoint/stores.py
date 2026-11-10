@@ -1,4 +1,4 @@
-"""Open the selected installation's store client before starting Bannerlord."""
+"""Activate Steam's game link or open another installation's store client."""
 
 import json
 import os
@@ -88,7 +88,7 @@ def xbox_application():
     return "shell:AppsFolder\\" + valid[0]
 
 
-def open_client(store):
+def open_client(store, *, game_id=None):
     if os.name != "nt":
         raise ModError("Automatic store-client startup is supported on Windows.")
     if store == XBOX:
@@ -97,6 +97,8 @@ def open_client(store):
         import winreg
 
         protocol, target = PROTOCOLS[store]
+        if store == STEAM and game_id is not None:
+            target = f"steam://run/{game_id}"
         try:
             with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, protocol) as key:
                 winreg.QueryValueEx(key, "URL Protocol")

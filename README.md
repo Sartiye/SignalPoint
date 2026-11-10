@@ -9,6 +9,15 @@ The desktop source is public for inspection. The API and administration panel
 live in the separate private MBCloudflare backend. This client contains no Google
 Cloud credentials and does not import the backend package.
 
+## Download for Windows
+
+Get the latest installer from the [SignalPoint website](https://mb-cloudflare.ey.r.appspot.com/signalpoint/)
+or its [download link](https://mb-cloudflare.ey.r.appspot.com/signalpoint/download).
+The website lists current mods and their publisher artwork. Players need no account.
+Downloads go directly from Cloud Storage; a [SHA-256 checksum](https://mb-cloudflare.ey.r.appspot.com/signalpoint/download/checksum)
+is available for the current installer. Run a newer installer over an existing
+installation to upgrade while keeping your settings and installed mods.
+
 ## Run from source
 
 Install Python 3.13, then run from this checkout:
@@ -54,7 +63,13 @@ New publisher accounts, membership/expiry, storage allowance, and suspension are
 managed here. There is no per-upload approval step or payment processing.
 
 In SignalPoint, choose **Publisher**, sign in, select the assigned listing, and
-drag in the module folder or use **Open Folder**. Each selected folder must have
+open **Mod page** to edit its description, choose or remove a thumbnail, then
+**Save mod page**. These changes do not require a module upload or version change.
+Thumbnail previews use a square crop. Players see the image filling the card's
+left side, with details and actions beside it; image fetching is asynchronous
+and cached locally.
+
+In **Mod files**, drag in the module folder or use **Open Folder**. Each folder must have
 SubModule.xml at its root. Add required companion module folders explicitly.
 Choose **Scan & Review**, inspect versions, dependencies, destinations, and changed
 files, then **Confirm Upload**. Archives are unsupported.
@@ -71,13 +86,13 @@ Workshop modules are listed as unmanaged and are not silently overwritten.
   full. Downloads can pause, resume, and retry, with progress beneath the mod card.
 - Checks run at startup, on resume, every minute while open, and before launching.
   Updates stage while the game runs and apply after the game/launcher closes.
-- Start Launcher completes updates, makes sure the installation's Steam, Epic,
-  or Xbox PC client is running for the current user, then opens the official
-  launcher. A closed client opens automatically; an existing client is reused.
-  Startup waits up to 45 seconds and shows progress. A missing client or startup
-  timeout prevents the game launcher from starting. Sign-in and client updates
+- Start Launcher completes updates. For Steam installs it opens the game's
+  `steam://run/261550` link, letting Steam handle client startup and its configured
+  launch options. It uses the Steam library's registered Bannerlord installation.
+  For Epic and Xbox PC it checks/opens the current user's store client, waits up
+  to 45 seconds, then opens the official launcher. Sign-in and client updates
   remain in the store app. Failed mod checks offer an explicit existing-install
-  launch option, which still performs the store-client check.
+  launch option using the same store-specific launch flow.
 - File hashes and module metadata are verified. Folder swaps are journaled and
   recoverable. Repair can replace modified managed files; uninstall preserves
   unrelated and locally modified files.
@@ -105,6 +120,46 @@ installers; the executable embeds the same icon. `build-info.json` records the s
 the checkout was dirty, and the build command prints the executable's SHA-256.
 Development builds are unsigned. A license and signed public-release process
 remain to be selected.
+
+### Windows installer
+
+The installer packages the existing `dist\SignalPoint` folder; users do not
+need a separate Python or Qt installation. On the build machine, install
+[Inno Setup 7](https://jrsoftware.org/isdl.php), then run:
+
+```powershell
+.\scripts\build_installer.ps1
+# Rebuild the app and installer together:
+.\scripts\build_installer.ps1 -BuildApp
+```
+
+Output is `dist\installer\SignalPoint-Setup-0.1.0-x64.exe` (using the version in
+`pyproject.toml`), with SHA-256 and a build manifest alongside it. A custom compiler
+path can be supplied with `-Iscc`, or the `SIGNALPOINT_ISCC` environment variable.
+The build checks the bundled EXE's checksum and runs its startup check before
+compiling the installer.
+
+Setup installs for the current user under `%LOCALAPPDATA%\Programs\SignalPoint`,
+creates a Start menu shortcut, and offers an optional desktop shortcut. It uses
+the SignalPoint icon. Rerunning a new installer upgrades the same installed app.
+The uninstaller removes installed program files; local settings/cache in
+`%LOCALAPPDATA%\SignalPoint` and game Modules are preserved.
+
+To exercise installation, a same-version upgrade and uninstallation in a
+disposable workspace directory:
+
+```powershell
+.\.venv\Scripts\python scripts\test_installer.py dist\installer\SignalPoint-Setup-0.1.0-x64.exe
+```
+
+This check refuses to run if SignalPoint already has an installed-program entry;
+use a separate Windows account or Sandbox in that case. It creates no shortcuts
+and does not open the game. Pass `--upgrade-installer PATH` to verify a newer
+setup over an older one; the second setup must rediscover the original directory
+without a `/DIR` override, keep one program entry, and preserve user files.
+Same-version reinstall and a test-only 0.1.0 → 0.1.1 upgrade were verified.
+The initial installer is unsigned; signing the app
+and setup executable can be added for public releases.
 
 The UI uses PySide6 Essentials, like MBServerLauncher. Packaging uses an isolated
 Python/Windows PATH and avoids shadowing Windows ICU DLLs, following the existing

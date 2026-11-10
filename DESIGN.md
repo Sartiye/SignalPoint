@@ -155,10 +155,14 @@ the earlier suggestion that players manually apply each pending update.
 
 Before launching, use Native's steam.target/epic.target markers to identify the
 required store; Xbox layouts and detected-install metadata cover Xbox PC or
-manually selected installations. Reuse the current user's running client or open
-it through its registered Windows activation mechanism. Show startup progress
-and wait up to 45 seconds for the client process. Failure/timeout stops launch;
-store authentication and client updates remain user-controlled in the store UI.
+manually selected installations. Steam installations use the game's registered
+`steam://run/261550` link after updates, allowing Steam to start its own client and
+launch the registered library copy with the player's Steam launch options. Do
+not separately open Steam's library or start the launcher executable afterward.
+For Epic/Xbox, reuse the current user's running client or activate it through its
+registered Windows mechanism, showing progress and waiting up to 45 seconds.
+Failure/timeout stops launch. Store authentication and client updates remain
+user-controlled in the store UI.
 GOG/standalone installs do not require an optional store client. Keep external
 process DLL environments separate from the frozen desktop application's runtime.
 
@@ -504,6 +508,33 @@ website. Actual Epic/Xbox game execution remains to be validated on those
 installations.
 
 ## Remaining decisions
+
+Windows installer packaging uses Inno Setup 7 around the existing PyInstaller
+folder. Default installation is per user at LocalAppData/Programs/SignalPoint,
+with Start menu and optional desktop shortcuts using icon.ico. A stable
+Sartiye.SignalPoint AppId makes later installers update the same installation.
+Installer version comes from pyproject.toml. The initial development installer
+is unsigned; code signing remains a release decision.
+
+The installer bundles the Python/Qt runtime and third-party notices. Uninstall
+removes its tracked application files, while preserving local settings/cache and
+the game's installed modules. Verification installs to an isolated workspace,
+checks every payload hash and startup, exercises an upgrade, then uninstalls.
+The verifier refuses to replace an existing registered SignalPoint installation.
+
+Publisher descriptions and thumbnails are edited in the desktop's Mod page tab.
+The administrator creates/assigns a listing using only ID, name and publisher;
+no description field is required in the panel. Metadata changes keep the current
+module build/version unchanged. Marketplace cards place a full-height cover image
+on the left, description/version information in the middle, and actions on the
+right, with transfer progress below. Images load asynchronously with bounded
+concurrency and SHA-256-verified local caching.
+
+Small thumbnail uploads (4 MiB maximum) are decoded and normalized by the API
+into metadata-free 384-square PNGs. Stored images and player image downloads use
+the private Cloud Storage bucket and signed URLs. Actual module transfers remain
+direct to/from Cloud Storage. Superseded image objects become eligible for
+operator cleanup after 24 hours, and deleting a mod/account also purges thumbnails.
 
 - Periodic update-check cadence and presentation of offline/error launch options.
 - Download grace periods, failed-draft expiry, research artifact cleanup, and
