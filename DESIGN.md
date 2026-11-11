@@ -1,23 +1,19 @@
 # SignalPoint design notes
 
-## R2 storage preparation (10 November 2026)
+## Current hosting
 
-R2 will replace only file storage. The API/website stays on App Engine and account,
-catalog and build metadata stays in Firestore. Large transfers remain direct to
-object storage. Desktop source now recognizes signed R2 S3 endpoints (default/EU)
-without sending publisher credentials there. Version 0.1.1 is the R2-compatible
-client; existing public v0.1.0 rejects R2 URLs and must be upgraded.
+Private Cloudflare R2 storage holds module files, manifests, thumbnails and Windows
+installers. The website and API run on Google Cloud App Engine. Account, catalog
+and build metadata use Firestore. Large transfers use signed R2 S3 links directly
+between the desktop and storage. Publisher credentials authorize API requests.
 Uploads are limited to 5 GiB per file, including TPAC, checked before hashing and
 again by the server. Total mod size may exceed 5 GiB across several files.
 Interrupted R2 file uploads retry that file; completed files are reused.
-The backend has private R2 storage, scoped signed transfers, bounded cleanup and
-cloud-to-cloud migration verification. A real isolated R2 upload/install/update
-test passed. Full operator details live in the private backend's
-`docs/signalpoint-r2.md`.
+The backend provides scoped signed transfers and bounded content cleanup. Operator
+details are documented in the private backend's `docs/signalpoint-r2.md`.
 
-Working notes from the design discussion. Last updated: 2026-11-10.
-This document records the product direction. Local implementation was authorized
-on 2026-11-10. Live cloud deployment remains a separate step.
+Working notes from the design discussion. Last updated: 2026-11-11.
+This document records the current product direction and planned features.
 
 ## Product purpose
 
