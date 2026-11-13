@@ -33,14 +33,14 @@ Downloads go directly from object storage; a [SHA-256 checksum](https://mb-cloud
 is available for the current installer. Run a newer installer over an existing
 installation to upgrade while keeping your settings and installed mods.
 
-Version 0.1.2 adds published-module editing, reuse of matching existing modules,
-and clearer card thumbnails and transfer controls. It includes Cloudflare R2
-transfer support; versions older than 0.1.1 do not recognize R2 links.
-Publisher checkout checks
+Version 0.1.3 adds automatic publisher upload retries, login whitespace handling,
+and remembered publishing folders for each listing and module. It includes
+Cloudflare R2 transfer support. Publisher checkout checks
 the 5 GiB limit for each file, including TPAC files, before hashing or uploading.
 A mod may contain multiple files whose combined size exceeds 5 GiB. Completed
-file uploads are reused after interruption; an interrupted R2 file upload restarts
-that file. Player downloads can resume with HTTP Range requests.
+file uploads are reused after interruption. An interrupted R2 file upload restarts
+that file automatically, with up to three attempts and fresh upload links.
+Player downloads can resume with HTTP Range requests.
 
 ## Run from source
 
@@ -97,7 +97,8 @@ and are cached locally.
 In **Mod files**, the listing's published modules load as cards with their current
 names and versions. **Change** opens the standard Windows picker for that module's
 replacement folder. Untouched modules keep their stored files; local copies are
-unnecessary. **Remove** stages a module's removal from the next release.
+unnecessary. Each module's last selected folder is remembered locally across app
+restarts. **Remove** stages a module's removal from the next release.
 **+ Add module** accepts new module folders, including Shift/Ctrl multiple selection
 and drag and drop. **Reset changes** reloads the published modules.
 Each replacement/new folder needs SubModule.xml at its root. Add required companion

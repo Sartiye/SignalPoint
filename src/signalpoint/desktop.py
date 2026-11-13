@@ -1,6 +1,7 @@
 """Small native desktop interface: Installed, Browse, and folder-based publishing."""
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -254,9 +255,11 @@ class ModuleList(QListWidget):
 class PublisherDialog(QDialog):
     published = Signal()
 
-    def __init__(self, api, parent):
+    def __init__(self, api, parent, *, state=None):
         super().__init__(parent)
         self.api, self.paths, self.manifest = api, [], None
+        self.state = state if state is not None else getattr(parent, "state", None)
+        self.publishing_locations = {}
         self.module_rows, self.removed_modules = [], []
         self.base_build, self.changed_manifest = None, None
         self.base_manifest = {"schema": 1, "modules": [], "files": []}
@@ -473,11 +476,18 @@ class PublisherDialog(QDialog):
     def login(self):
         if self.worker:
             return
-        username, password = self.username.text(), self.password.text()
+        username, password = self.username.text().strip(), self.password.text()
+        self.username.setText(username)
         self.password.clear()
 
         def work(_):
-            self.api.login(username, password)
+            try:
+                self.api.login(username, password)
+            except ApiError as exc:
+                trimmed = password.strip()
+                if exc.status != 401 or not trimmed or trimmed == password:
+                    raise
+                self.api.login(username, trimmed)
             return self.api.publisher_mods()
 
         self.run(work, self.show_mods)
@@ -506,6 +516,7 @@ class PublisherDialog(QDialog):
         self.base_build = None
         self.base_manifest = {"schema": 1, "modules": [], "files": []}
         self.modules_loaded = False
+        self.publishing_locations = {}
         self.folders.set_modules([])
         self.notes.clear()
         self.description.setPlainText(mod.get("description", "") if mod else "")
@@ -515,6 +526,8 @@ class PublisherDialog(QDialog):
         self.page.setEnabled(bool(mod))
         if not mod:
             return
+        if self.state is not None:
+            self.publishing_locations = self.state.get(self._publishing_path_key(), {})
 
         def work(_):
             current = self.api.publisher_manifest(mod["id"])
@@ -620,7 +633,7 @@ class PublisherDialog(QDialog):
 
     def open_folder(self):
         try:
-            paths = choose_folders(int(self.winId()), self.paths[-1].parent if self.paths else None)
+            paths = choose_folders(int(self.winId()), self._publishing_directory())
         except OSError as exc:
             self.show_error(f"The folder picker could not be opened: {exc}")
             return
@@ -649,7 +662,30 @@ class PublisherDialog(QDialog):
                 key for key in self.removed_modules if key.casefold() not in restored
             ]
             self.module_rows.extend(additions)
+            self._remember_publishing_paths(additions)
             self.refresh_modules()
+
+    def _publishing_path_key(self):
+        return "publisher_paths:" + json.dumps([self.api.base, self.listing.currentData()["id"]])
+
+    def _publishing_directory(self, identifier=None, source=None):
+        saved = self.publishing_locations.get("modules", {}).get((identifier or "").casefold())
+        selected = source or saved or self.publishing_locations.get("directory")
+        if selected:
+            path = Path(selected)
+            for candidate in (path, *path.parents):
+                if candidate.is_dir():
+                    return candidate
+        return None
+
+    def _remember_publishing_paths(self, entries):
+        modules = self.publishing_locations.setdefault("modules", {})
+        for entry in entries:
+            source = entry["source"]
+            modules[entry["module"]["id"].casefold()] = str(source)
+            self.publishing_locations["directory"] = str(source.parent)
+        if self.state is not None:
+            self.state.set(self._publishing_path_key(), self.publishing_locations)
 
     def refresh_modules(self):
         self.paths = [entry["source"] for entry in self.module_rows if entry["source"] is not None]
@@ -669,7 +705,7 @@ class PublisherDialog(QDialog):
         try:
             source = entry["source"]
             paths = choose_folders(
-                int(self.winId()), source.parent if source else None, multiple=False
+                int(self.winId()), self._publishing_directory(identifier, source), multiple=False
             )
             if not paths:
                 return
@@ -686,6 +722,7 @@ class PublisherDialog(QDialog):
             self.show_error(str(exc))
             return
         entry.update(module=module, source=replacement)
+        self._remember_publishing_paths([entry])
         self.refresh_modules()
 
     def remove_folder(self):

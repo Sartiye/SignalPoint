@@ -16,7 +16,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from test_modules import module
 
-from signalpoint.api import DEFAULT_API_URL, Api
+from signalpoint.api import DEFAULT_API_URL, Api, ApiError
 from signalpoint.desktop import (
     STYLE,
     CardThumbnail,
@@ -46,6 +46,51 @@ def wait(app, condition, timeout=5):
         time.sleep(0.01)
     for _ in range(3):
         app.processEvents()
+
+
+@pytest.mark.parametrize(
+    ("entered", "accepted", "attempts", "success"),
+    [
+        (" \tcorrect horse battery\u00a0 ", "correct horse battery", 2, True),
+        (" correct horse battery ", " correct horse battery ", 1, True),
+        (" wrong password ", "correct password", 2, False),
+    ],
+)
+def test_publisher_login_handles_surrounding_whitespace(app, entered, accepted, attempts, success):
+    class Publisher:
+        base = "http://127.0.0.1/signalpoint"
+        token = ""
+
+        def __init__(self):
+            self.attempts = []
+
+        def login(self, username, password):
+            assert username == "publisher"
+            self.attempts.append(password)
+            if password != accepted:
+                raise ApiError(401, "Incorrect username or password")
+            self.token = "session"
+
+        def publisher_mods(self):
+            return []
+
+    api = Publisher()
+    dialog = PublisherDialog(api, None)
+    dialog.show()
+    dialog.username.setText("  publisher\u00a0 ")
+    dialog.password.setText(entered)
+    QTest.keyClick(dialog.password, Qt.Key.Key_Return)
+    wait(app, lambda: dialog.worker is None)
+    assert len(api.attempts) == attempts
+    assert api.attempts[0] == entered
+    assert dialog.username.text() == "publisher" and dialog.password.text() == ""
+    assert dialog.login_box.isHidden() == success
+    if success:
+        assert api.attempts[-1] == accepted
+    else:
+        assert dialog.status.text() == "Incorrect username or password"
+    dialog.close()
+    app.processEvents()
 
 
 def test_publisher_selects_multiple_folders_and_removes_a_selection(app, tmp_path, monkeypatch):
@@ -215,6 +260,83 @@ def test_publisher_loads_online_modules_and_changes_only_the_chosen_module(
     wait(app, lambda: dialog.worker is None)
     assert dialog.confirm.isEnabled() and dialog.changed_manifest is None
     assert [m["id"] for m in dialog.manifest["modules"]] == ["Armory"]
+    dialog.close()
+    app.processEvents()
+
+
+def test_publisher_remembers_module_paths_across_restarts_and_scopes_them(
+    app, tmp_path, monkeypatch
+):
+    first = module(tmp_path / "project/First", "First")
+    second = module(tmp_path / "another/Second", "Second")
+    manifests = {"first": scan([first]), "second": scan([second])}
+    state_directory = tmp_path / "state"
+    calls, selection = [], [first]
+
+    class Publisher:
+        token = ""
+
+        def __init__(self, base):
+            self.base = base
+
+        def publisher_manifest(self, mod):
+            return {"build_id": "a" * 64, "manifest": manifests[mod]}
+
+    def open_dialog(base="https://example.com/signalpoint", listing=0):
+        dialog = PublisherDialog(Publisher(base), None, state=State(state_directory))
+        dialog.show_mods([{"id": "first", "name": "First"}, {"id": "second", "name": "Second"}])
+        dialog.show()
+        wait(app, lambda: dialog.worker is None)
+        if listing:
+            dialog.listing.setCurrentIndex(listing)
+            wait(app, lambda: dialog.worker is None)
+        return dialog
+
+    def choose(owner, directory, *, multiple=True):
+        calls.append((directory, multiple))
+        return list(selection)
+
+    monkeypatch.setattr("signalpoint.desktop.choose_folders", choose)
+    dialog = open_dialog()
+    dialog.change_folder("First")
+    assert calls[-1] == (None, False)
+    dialog.close()
+
+    # A new dialog and SQLite connection restore the picker location. Published
+    # modules still load without automatically selecting local replacements.
+    dialog = open_dialog()
+    assert dialog.paths == [] and dialog.module_rows[0]["source"] is None
+    selection.clear()
+    dialog.change_folder("First")
+    assert calls[-1] == (first, False)
+    dialog.open_folder()
+    assert calls[-1] == (first.parent, True)
+    selection.append(second)
+    dialog.change_folder("First")
+    assert "module ID First" in dialog.status.text()
+    dialog.close()
+
+    # Cancel and an invalid replacement have kept the original location.
+    dialog = open_dialog()
+    selection.clear()
+    dialog.change_folder("First")
+    assert calls[-1] == (first, False)
+    dialog.listing.setCurrentIndex(1)
+    wait(app, lambda: dialog.worker is None)
+    dialog.change_folder("Second")
+    assert calls[-1] == (None, False)
+    dialog.close()
+    dialog = open_dialog(base="https://another.example/signalpoint")
+    dialog.change_folder("First")
+    assert calls[-1] == (None, False)
+    dialog.close()
+
+    # A removed folder falls back to its closest existing parent.
+    (first / "SubModule.xml").unlink()
+    first.rmdir()
+    dialog = open_dialog()
+    dialog.change_folder("First")
+    assert calls[-1] == (first.parent, False)
     dialog.close()
     app.processEvents()
 

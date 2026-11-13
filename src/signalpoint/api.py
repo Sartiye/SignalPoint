@@ -12,12 +12,17 @@ import httpx
 from signalpoint.manifest import CHUNK, ModError, hashes, validate_manifest, validate_upload_sizes
 
 DEFAULT_API_URL = "https://mb-cloudflare.ey.r.appspot.com/signalpoint"
+TRANSIENT_HTTP = {408, 429, 500, 502, 503, 504}
 
 
 class ApiError(ModError):
     def __init__(self, status, detail):
         super().__init__(detail)
         self.status = status
+
+
+class ApiConnectionError(ModError):
+    pass
 
 
 class Cancelled(ModError):
@@ -86,7 +91,7 @@ class Api:
                 method, self.base + "/api/v1/" + path.lstrip("/"), headers=headers, **payload
             )
         except httpx.HTTPError as exc:
-            raise ModError(
+            raise ApiConnectionError(
                 "Cannot reach SignalPoint. Check your internet connection and try again."
             ) from exc
         if not response.is_success:
@@ -200,7 +205,7 @@ class Api:
                     if response.status_code == 403 and attempt < 2:
                         self._tickets.pop(key, None)
                         continue
-                    if response.status_code in {408, 429, 500, 502, 503, 504} and attempt < 2:
+                    if response.status_code in TRANSIENT_HTTP and attempt < 2:
                         control.check()
                         time.sleep(0.25 * (attempt + 1))
                         continue
@@ -291,11 +296,12 @@ class Api:
         unique = list(entries)
         total = sum(f["size"] for f in entries.values())
         completed = 0
+        upload_route = f"builds/{draft['id']}/uploads"
         for start in range(0, len(unique), 100):
             control.check()
             tickets = self.request(
                 "POST",
-                f"builds/{draft['id']}/uploads",
+                upload_route,
                 {"hashes": unique[start : start + 100]},
                 authenticated=True,
             )
@@ -303,8 +309,8 @@ class Api:
                 control.check()
                 entry = entries[sha]
 
-                def update(count, base=completed):
-                    progress({"state": "Uploading", "done": base + count, "total": total})
+                def update(count, state="Uploading", base=completed):
+                    progress({"state": state, "done": base + count, "total": total})
 
                 if ticket["mode"] == "present":
                     update(entry["size"])
@@ -322,41 +328,62 @@ class Api:
                 validate_upload_sizes([{"path": entry["path"], "size": path.stat().st_size}])
                 if hashes(path) != (sha, entry["md5"]):
                     raise ModError(f"Source changed since review. Scan again: {entry['path']}")
-                url = self.transfer_url(ticket["url"])
                 if ticket["mode"] == "resumable":
+                    url = self.transfer_url(ticket["url"])
                     self._resumable_upload(url, ticket, path, entry, control, update)
                 else:
-
-                    def content(path=path):
-                        sent = 0
-                        with path.open("rb") as source:
-                            while block := source.read(CHUNK):
-                                control.check()
-                                yield block
-                                sent += len(block)
-                                update(sent)
-
-                    try:
-                        response = self.http.put(
-                            url,
-                            headers={
-                                **ticket.get("headers", {}),
-                                "Content-Length": str(entry["size"]),
-                            },
-                            content=content(),
-                        )
-                    except httpx.HTTPError as exc:
-                        raise ModError("Upload interrupted. Retry the reviewed upload.") from exc
-                    if not response.is_success and not (
-                        ticket["mode"] == "s3-put" and response.status_code == 412
-                    ):
-                        raise ModError(
-                            f"Upload failed (HTTP {response.status_code}). Rescan and retry."
-                        )
+                    self._put_upload(upload_route, ticket, path, entry, control, update)
                 completed += entry["size"]
         control.check()
         progress({"state": "Checking upload", "done": total, "total": total})
         return self.request("POST", f"builds/{draft['id']}/complete", {}, authenticated=True)
+
+    def _put_upload(self, route, ticket, path, entry, control, progress):
+        def content():
+            sent = 0
+            with path.open("rb") as source:
+                while block := source.read(CHUNK):
+                    control.check()
+                    yield block
+                    sent += len(block)
+                    progress(sent)
+
+        r2 = ticket["mode"] == "s3-put"
+        attempts = 3 if r2 else 1
+        for attempt in range(attempts):
+            control.check()
+            try:
+                if attempt:
+                    sha = entry["sha256"]
+                    ticket = self.request("POST", route, {"hashes": [sha]}, authenticated=True)[sha]
+                    if ticket["mode"] == "present":
+                        progress(entry["size"])
+                        return
+                    if ticket["mode"] != "s3-put":
+                        raise ModError("The upload method changed. Click Confirm Upload to retry.")
+                response = self.http.put(
+                    self.transfer_url(ticket["url"]),
+                    headers={**ticket.get("headers", {}), "Content-Length": str(entry["size"])},
+                    content=content(),
+                )
+            except (httpx.TransportError, ApiConnectionError):
+                failure = "Upload interrupted"
+            except ApiError as exc:
+                if exc.status not in TRANSIENT_HTTP:
+                    raise
+                failure = f"Could not renew the upload link (HTTP {exc.status})"
+            else:
+                status = response.status_code
+                if response.is_success or (r2 and status == 412):
+                    progress(entry["size"])
+                    return
+                failure = f"Upload failed (HTTP {status})"
+                if status not in TRANSIENT_HTTP | {403, 409}:
+                    break
+            if attempt + 1 < attempts:
+                progress(0, f"Retrying {path.name} ({attempt + 2}/{attempts})")
+                time.sleep(1 + attempt)
+        raise ModError(f"{failure}: {entry['path']}. Click Confirm Upload to retry.")
 
     def _resumable_upload(self, url, ticket, path, entry, control, progress):
         size, offset = entry["size"], 0

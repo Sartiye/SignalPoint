@@ -1,11 +1,12 @@
 import base64
 import hashlib
+import json
 
 import httpx
 import pytest
 
 from signalpoint.api import Api, TransferControl
-from signalpoint.manifest import ModError
+from signalpoint.manifest import ModError, scan
 
 
 def test_download_resumes_with_range_and_verifies_hash(tmp_path):
@@ -113,6 +114,74 @@ def test_signed_r2_download_resumes_without_publisher_authorization(tmp_path):
     target.write_bytes(content[:5])
     api.download("build", entry, target, TransferControl(), lambda _: None)
     assert target.read_bytes() == content
+
+
+@pytest.mark.parametrize("failure", ["interrupted", "already_stored", "expired"])
+def test_publisher_retries_only_the_failed_r2_file(tmp_path, monkeypatch, failure):
+    from test_modules import module
+
+    from signalpoint import api as transfers
+
+    folder = module(tmp_path / "Example")
+    content = b"published asset"
+    (folder / "asset.tpac").write_bytes(content)
+    manifest = scan([folder])
+    asset = next(f for f in manifest["files"] if f["path"].endswith(".tpac"))
+    issued, uploads, progress = [], [], []
+    monkeypatch.setattr(transfers.time, "sleep", lambda _: None)
+
+    def handler(request):
+        if request.url.host.endswith(".r2.cloudflarestorage.com"):
+            assert "authorization" not in request.headers
+            assert request.read() == content
+            uploads.append(request.url.params["ticket"])
+            if len(uploads) == 1:
+                if failure == "expired":
+                    return httpx.Response(403)
+                raise httpx.ReadError("connection lost", request=request)
+            return httpx.Response(200)
+        assert request.headers["authorization"] == "Bearer publisher"
+        if request.url.path.endswith("/module-drafts"):
+            return httpx.Response(
+                201,
+                json={
+                    "build": {"id": "build", "status": "uploading"},
+                    "manifest": manifest,
+                },
+            )
+        if request.url.path.endswith("/uploads"):
+            requested = json.loads(request.content)["hashes"]
+            issued.append(requested)
+            tickets = {sha: {"mode": "present"} for sha in requested}
+            if len(issued) == 1 or failure != "already_stored":
+                tickets[asset["sha256"]] = {
+                    "mode": "s3-put",
+                    "url": (
+                        f"https://{'a' * 32}.eu.r2.cloudflarestorage.com/b/file"
+                        f"?ticket={len(issued)}"
+                    ),
+                }
+            return httpx.Response(200, json=tickets)
+        assert request.url.path.endswith("/complete")
+        return httpx.Response(200, json={"status": "published"})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        api = Api("https://example.com/signalpoint", client=client)
+        api.token = "publisher"
+        result = api.upload_modules(
+            "example",
+            None,
+            manifest,
+            [],
+            [folder],
+            "",
+            TransferControl(),
+            progress.append,
+        )
+    assert result["status"] == "published"
+    assert len(issued) == 2 and len(issued[0]) == 2 and issued[1] == [asset["sha256"]]
+    assert uploads == (["1"] if failure == "already_stored" else ["1", "2"])
+    assert any(item["state"].startswith("Retrying asset.tpac") for item in progress)
 
 
 def test_launcher_uses_its_binary_directory(tmp_path, monkeypatch):
