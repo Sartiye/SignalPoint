@@ -8,7 +8,17 @@ and build metadata use Firestore. Large transfers use signed R2 S3 links directl
 between the desktop and storage. Publisher credentials authorize API requests.
 Uploads are limited to 5 GiB per file, including TPAC, checked before hashing and
 again by the server. Total mod size may exceed 5 GiB across several files.
-Interrupted R2 file uploads retry that file; completed files are reused.
+R2 files over 500 MiB use 500 MiB multipart uploads in the current source.
+Completed parts are retained for resume, including after reopening the desktop.
+Smaller files retry as a whole; completed files are reused. Parts stream from disk
+in small buffers. The backend signs each part's number, length and MD5, validates
+stored parts and completes the object with a create-only condition. Multipart
+metadata binds the composite ETag to the reviewed file identity. Player downloads
+continue to verify SHA-256. Existing clients retain single-PUT uploads.
+Multipart sessions expire after seven days. Cancellation preserves completed
+parts for Retry; the manual server cleanup command aborts expired sessions and
+retires their records. R2's default incomplete-upload lifecycle also provides
+seven-day cleanup for an orphan left by an interrupted session-creation request.
 The backend provides scoped signed transfers and bounded content cleanup. Operator
 details are documented in the private backend's `docs/signalpoint-r2.md`.
 

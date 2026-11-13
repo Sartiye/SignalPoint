@@ -77,7 +77,7 @@ class Api:
         headers = {
             "Cache-Control": "no-cache",
             "Accept": "application/json",
-            "X-SignalPoint-Transfers": "gcs,r2",
+            "X-SignalPoint-Transfers": "gcs,r2,r2-multipart",
         }
         if authenticated:
             if not self.token:
@@ -326,6 +326,12 @@ class Api:
                 if not path.is_file():
                     raise ModError(f"Source changed since review. Scan again: {entry['path']}")
                 validate_upload_sizes([{"path": entry["path"], "size": path.stat().st_size}])
+                if ticket["mode"] == "s3-multipart":
+                    from signalpoint.multipart import upload
+
+                    upload(self, draft["id"], ticket, path, entry, control, update)
+                    completed += entry["size"]
+                    continue
                 if hashes(path) != (sha, entry["md5"]):
                     raise ModError(f"Source changed since review. Scan again: {entry['path']}")
                 if ticket["mode"] == "resumable":

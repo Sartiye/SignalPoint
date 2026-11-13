@@ -33,16 +33,19 @@ Downloads go directly from object storage; a [SHA-256 checksum](https://mb-cloud
 is available for the current installer. Run a newer installer over an existing
 installation to upgrade while keeping your settings and installed mods.
 
-Version 0.1.4 reuses existing modules across different folder names and recognizes
-files already copied in from an incoming update, while preserving extra local
-files. It also includes automatic publisher upload retries, login whitespace
-handling, remembered publishing folders for each listing and module, and
-Cloudflare R2 transfer support. Publisher checkout checks
-the 5 GiB limit for each file, including TPAC files, before hashing or uploading.
-A mod may contain multiple files whose combined size exceeds 5 GiB. Completed
-file uploads are reused after interruption. An interrupted R2 file upload restarts
-that file automatically, with up to three attempts and fresh upload links.
-Player downloads can resume with HTTP Range requests.
+Version 0.1.5 adds resumable 500 MiB upload parts for files larger than 500 MiB,
+up to the existing 5 GiB per-file limit. Completed parts are reused after an
+interruption or app restart. Only the unfinished part needs to be sent again.
+Parts stream in small buffers, keeping memory use low. Publishing progress shows
+the current part and includes bytes already stored. Cancel preserves parts for
+Retry; abandoned sessions expire after seven days and are eligible for manual
+server cleanup. Smaller files retry as a whole with fresh upload links.
+
+Publisher checkout checks the per-file limit, including TPAC files, before hashing
+or uploading. A mod may exceed 5 GiB across several files. Existing completed file
+uploads are reused, and player downloads can resume with HTTP Range requests.
+The client also includes remembered publishing folders, login whitespace handling,
+and installation reuse of existing modules and files already matching an update.
 
 ## Run from source
 
