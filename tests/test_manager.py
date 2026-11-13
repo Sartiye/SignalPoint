@@ -125,11 +125,73 @@ def test_source_api_change_cannot_take_over_existing_install(setup):
         manager.install("example", "Example", "second", scan([source]))
 
 
-def test_existing_module_is_reused_without_downloads_and_becomes_managed(tmp_path):
+@pytest.mark.parametrize("fail_commit", [False, True])
+def test_update_reuses_prepublished_files_and_preserves_working_files(
+    setup, monkeypatch, fail_commit
+):
+    manager, source, state = setup
+    module(source, version="v1.1.0")
+    (source / "data.txt").write_text("next release")
+    (source / "assets").mkdir()
+    (source / "assets/new.tpac").write_bytes(b"preinstalled new asset")
+    local = manager.modules / "Example"
+    shutil.copytree(source, local, dirs_exist_ok=True)
+    (local / "unpublished.txt").write_text("work for a future release")
+    manifest = scan([source])
+    manager.api.downloaded.clear()
+
+    if fail_commit:
+
+        def fail(*_):
+            raise OSError("simulated prepublished update failure")
+
+        monkeypatch.setattr(state, "commit", fail)
+        with pytest.raises(OSError, match="prepublished update failure"):
+            manager.install("example", "Example", "second", manifest)
+        manager.recover()
+        assert state.installs(manager.game)["example"]["build_id"] == "first"
+    else:
+        manager.install("example", "Example", "second", manifest)
+        assert state.installs(manager.game)["example"]["manifest"] == manifest
+        # The adopted files are managed on subsequent updates too.
+        manager.install("example", "Example", "second", manifest)
+    assert manager.api.downloaded == []
+    assert (local / "data.txt").read_text() == "next release"
+    assert (local / "assets/new.tpac").read_bytes() == b"preinstalled new asset"
+    assert (local / "unpublished.txt").read_text() == "work for a future release"
+
+
+@pytest.mark.parametrize("repair", [False, True])
+def test_different_prepublished_file_requires_repair_before_replacement(setup, repair):
+    manager, source, state = setup
+    (source / "new.txt").write_text("published content")
+    local = manager.modules / "Example"
+    (local / "new.txt").write_text("unpublished work")
+    (local / "notes.txt").write_text("keep notes")
+    manager.api.downloaded.clear()
+    manifest = scan([source])
+    if repair:
+        manager.install("example", "Example", "second", manifest, repair=True)
+        assert (local / "new.txt").read_text() == "published content"
+        assert manager.api.downloaded == ["Example/new.txt"]
+        assert state.installs(manager.game)["example"]["manifest"] == manifest
+    else:
+        with pytest.raises(ModError, match="Local file differs.*Use Repair"):
+            manager.install("example", "Example", "second", manifest)
+        assert (local / "new.txt").read_text() == "unpublished work"
+        assert manager.api.downloaded == []
+        assert state.installs(manager.game)["example"]["build_id"] == "first"
+    assert (local / "notes.txt").read_text() == "keep notes"
+
+
+@pytest.mark.parametrize("installed_folder", ["Example", "ManualExample"])
+def test_existing_module_is_reused_without_downloads_and_becomes_managed(
+    tmp_path, installed_folder
+):
     source = module(tmp_path / "source" / "Example")
     (source / "asset.tpac").write_bytes(b"already installed")
     install = game(tmp_path / "game")
-    local = install / "Modules/Example"
+    local = install / "Modules" / installed_folder
     shutil.copytree(source, local)
     (local / "personal.txt").write_text("keep this")
     state = State(tmp_path / "state")
@@ -137,6 +199,9 @@ def test_existing_module_is_reused_without_downloads_and_becomes_managed(tmp_pat
     manager = Manager(state, install, api, process_check=lambda: False)
     manifest = scan([source])
     manager.install("example", "Example", "first", manifest)
+    if installed_folder != "Example":
+        assert not local.exists()
+    local = install / "Modules/Example"
     assert api.downloaded == []
     assert state.installs(install)["example"]["manifest"] == manifest
     assert (local / "personal.txt").read_text() == "keep this"
@@ -146,8 +211,9 @@ def test_existing_module_is_reused_without_downloads_and_becomes_managed(tmp_pat
 
 
 @pytest.mark.parametrize("fail_commit", [False, True])
+@pytest.mark.parametrize("installed_folder", ["Example", "ManualExample"])
 def test_existing_bundle_downloads_only_changes_and_can_roll_back(
-    tmp_path, monkeypatch, fail_commit
+    tmp_path, monkeypatch, fail_commit, installed_folder
 ):
     source = module(tmp_path / "source/Example", version="v1.1.0")
     (source / "changed.tpac").write_bytes(b"new content")
@@ -156,7 +222,7 @@ def test_existing_bundle_downloads_only_changes_and_can_roll_back(
     companion = module(tmp_path / "source/Companion", "Companion")
     (companion / "asset.tpac").write_bytes(b"complete companion")
     install = game(tmp_path / "game")
-    local = module(install / "Modules/Example", version="v1.0.0")
+    local = module(install / "Modules" / installed_folder, version="v1.0.0")
     (local / "changed.tpac").write_bytes(b"old content")
     (local / "same.tpac").write_bytes(b"matching asset")
     (local / "personal.txt").write_text("keep settings")
@@ -177,8 +243,13 @@ def test_existing_bundle_downloads_only_changes_and_can_roll_back(
         assert (local / "changed.tpac").read_bytes() == b"old content"
         assert not (local / "missing.txt").exists()
         assert state.installs(install) == {}
+        if installed_folder != "Example":
+            assert not (install / "Modules/Example").exists()
     else:
         manager.install("example", "Example", "first", scan([source, companion]))
+        if installed_folder != "Example":
+            assert not local.exists()
+        local = install / "Modules/Example"
         assert "v1.1.0" in (local / "SubModule.xml").read_text()
         assert (local / "changed.tpac").read_bytes() == b"new content"
         assert (local / "missing.txt").read_text() == "new file"
@@ -209,3 +280,31 @@ def test_another_managed_mod_keeps_ownership(setup):
     with pytest.raises(ModError, match="owned by another managed mod"):
         manager.install("another", "Another", "first", scan([source]))
     assert set(state.installs(manager.game)) == {"example"}
+
+
+def test_duplicate_installed_module_ids_are_reported_without_changes(tmp_path):
+    source = module(tmp_path / "source/Example")
+    install = game(tmp_path / "game")
+    first = module(install / "Modules/ManualExample")
+    second = module(install / "Modules/OtherExample")
+    state = State(tmp_path / "state")
+    api = Files([source])
+    manager = Manager(state, install, api, process_check=lambda: False)
+    with pytest.raises(ModError, match="multiple installed copies: ManualExample, OtherExample"):
+        manager.install("example", "Example", "first", scan([source]))
+    assert first.exists() and second.exists()
+    assert not (install / "Modules/Example").exists()
+    assert api.downloaded == [] and state.installs(install) == {}
+
+
+def test_existing_module_in_official_folder_cannot_be_adopted(tmp_path):
+    source = module(tmp_path / "source/Example")
+    install = game(tmp_path / "game")
+    local = module(install / "Modules/SandBox", "Example")
+    state = State(tmp_path / "state")
+    api = Files([source])
+    manager = Manager(state, install, api, process_check=lambda: False)
+    with pytest.raises(ModError, match="Official Bannerlord modules"):
+        manager.install("example", "Example", "first", scan([source]))
+    assert local.exists() and not (install / "Modules/Example").exists()
+    assert api.downloaded == [] and state.installs(install) == {}

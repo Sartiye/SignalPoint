@@ -33,8 +33,10 @@ Downloads go directly from object storage; a [SHA-256 checksum](https://mb-cloud
 is available for the current installer. Run a newer installer over an existing
 installation to upgrade while keeping your settings and installed mods.
 
-Version 0.1.3 adds automatic publisher upload retries, login whitespace handling,
-and remembered publishing folders for each listing and module. It includes
+Version 0.1.4 reuses existing modules across different folder names and recognizes
+files already copied in from an incoming update, while preserving extra local
+files. It also includes automatic publisher upload retries, login whitespace
+handling, remembered publishing folders for each listing and module, and
 Cloudflare R2 transfer support. Publisher checkout checks
 the 5 GiB limit for each file, including TPAC files, before hashing or uploading.
 A mod may contain multiple files whose combined size exceeds 5 GiB. Completed
@@ -113,7 +115,12 @@ Initial testing should use a separate test installation. Existing module folders
 are listed as unmanaged until installation. Installing the matching marketplace
 mod adopts those folders: matching files are reused, missing or different published
 files are updated, and unrelated files are preserved. Module IDs must match, and
-modules already managed by another listing remain protected.
+modules already managed by another listing remain protected. An existing module
+with a different folder name moves to the published folder name during installation.
+If several installed folders declare the same module ID, keep one copy first.
+Updates also reuse files already copied in from the incoming release, including
+new files absent from the previous install record. Extra unpublished files stay
+in place. Differing local edits require Repair before replacement.
 
 ## Updates and installation
 

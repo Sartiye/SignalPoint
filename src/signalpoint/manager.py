@@ -174,6 +174,8 @@ class Manager:
             if len({f.casefold() for f in all_folders}) != len(all_folders):
                 raise ModError("Publisher changed module-folder casing; keep it consistent.")
             adopted_folders = set()
+            module_sources = {}
+            retired_folders = set()
             installed_modules = bannerlord.installed_modules(self.game)
             for module in manifest["modules"]:
                 for receipt in installs.values():
@@ -192,24 +194,41 @@ class Manager:
                         raise ModError(
                             f"{module['folder']} contains a different module ({actual['id']})."
                         )
-                    adopted_folders.add(module["folder"])
-                for installed in installed_modules:
-                    if (
-                        installed["id"].casefold() == module["id"].casefold()
-                        and installed["folder"] not in old_folders
-                        and not (
-                            module["folder"] in adopted_folders
-                            and installed["folder"].casefold() == module["folder"].casefold()
-                        )
-                    ):
+                matches = [
+                    installed
+                    for installed in installed_modules
+                    if installed["id"].casefold() == module["id"].casefold()
+                ]
+                if len(matches) > 1:
+                    folders = ", ".join(sorted(m["folder"] for m in matches))
+                    raise ModError(
+                        f"Module {module['id']} has multiple installed copies: {folders}. "
+                        "Keep one copy before installing."
+                    )
+                if matches and matches[0]["folder"] not in old_folders:
+                    installed_folder = matches[0]["folder"]
+                    read_module(self.modules / installed_folder)
+                    if module["folder"] in old_folders:
                         raise ModError(
-                            f"Module {module['id']} is already installed outside this mod."
+                            f"Module {module['id']} also exists in {installed_folder}. "
+                            "Keep the managed copy before updating."
                         )
+                    adopted_folders.add(module["folder"])
+                    if installed_folder.casefold() != module["folder"].casefold():
+                        module_sources[module["folder"]] = installed_folder
+                        retired_folders.add(installed_folder)
+            all_folders |= retired_folders
+
+            def installed_path(path):
+                folder, relative = path.split("/", 1)
+                return self.modules / module_sources.get(folder, folder) / relative
+
             old_files = {f["path"]: f for f in old["files"]}
-            adopted_files = {
+            incoming_files = {f["path"]: f for f in manifest["files"]}
+            added_files = {
                 entry["path"]: entry
                 for entry in manifest["files"]
-                if entry["path"].split("/", 1)[0] in adopted_folders
+                if entry["path"] not in old_files
             }
             verified = {}
             progress({"state": "Checking installed files", "done": 0, "total": 0})
@@ -218,36 +237,43 @@ class Manager:
                 source = self.modules / path
                 if is_link(source) or any(is_link(p) for p in source.parents if p != self.game):
                     raise ModError("A managed path has become a link.")
-                if (
-                    source.is_file()
-                    and source.stat().st_size == entry["size"]
-                    and hashes(source, lambda _: control.check())[0] == entry["sha256"]
+                candidates = [entry]
+                if path in incoming_files:
+                    candidates.append(incoming_files[path])
+                if source.is_file() and any(
+                    source.stat().st_size == candidate["size"] for candidate in candidates
                 ):
-                    verified[path] = entry["sha256"]
-                elif source.exists() and not repair:
+                    sha = hashes(source, lambda _: control.check())[0]
+                    if any(sha == candidate["sha256"] for candidate in candidates):
+                        verified[path] = sha
+                        continue
+                if source.exists() and not repair:
                     raise ModError(
                         f"Locally modified file: {path}. Use Repair to replace managed edits."
                     )
-            for path, entry in adopted_files.items():
+            for path, entry in added_files.items():
                 control.check()
-                source = self.modules / path
+                source = installed_path(path)
                 if is_link(source) or any(is_link(p) for p in source.parents if p != self.game):
                     raise ModError("An existing module path contains a link.")
+                if source.exists() and not source.is_file():
+                    raise ModError(f"A directory occupies {path}. Move it before installing.")
                 if (
                     source.is_file()
                     and source.stat().st_size == entry["size"]
                     and hashes(source, lambda _: control.check())[0] == entry["sha256"]
                 ):
                     verified[path] = entry["sha256"]
+                elif (
+                    source.exists() and path.split("/", 1)[0] not in adopted_folders and not repair
+                ):
+                    raise ModError(
+                        f"Local file differs from the published update: {path}. "
+                        "Use Repair to replace it with the published file."
+                    )
             needed = []
             for entry in manifest["files"]:
                 if verified.get(entry["path"]) != entry["sha256"]:
-                    if (
-                        entry["path"] not in old_files
-                        and entry["path"] not in adopted_files
-                        and (self.modules / entry["path"]).exists()
-                    ):
-                        raise ModError(f"An unrelated file occupies {entry['path']}.")
                     needed.append(entry)
             # Downloads occur before the short filesystem transaction, including while
             # Bannerlord is running. Only verified content reaches the staged modules.
@@ -282,11 +308,12 @@ class Manager:
             try:
                 for folder in sorted(all_folders):
                     target = directory / "new" / folder
-                    if (self.modules / folder).exists():
-                        copy_tree(self.modules / folder, target)
+                    source = self.modules / module_sources.get(folder, folder)
+                    if folder not in retired_folders and source.exists():
+                        copy_tree(source, target)
                     else:
                         target.mkdir(parents=True)
-                for entry in (old_files | adopted_files).values():
+                for entry in (old_files | incoming_files).values():
                     target = directory / "new" / entry["path"]
                     if target.is_file():
                         target.unlink()
@@ -299,10 +326,11 @@ class Manager:
                     if target.exists():
                         raise ModError(f"Destination conflict: {entry['path']}")
                     if verified.get(entry["path"]) == entry["sha256"]:
+                        source = installed_path(entry["path"])
                         try:
-                            os.link(self.modules / entry["path"], target)
+                            os.link(source, target)
                         except OSError:
-                            shutil.copy2(self.modules / entry["path"], target)
+                            shutil.copy2(source, target)
                     else:
                         source = self.cache / (entry["sha256"] + ".part")
                         if hashes(source)[0] != entry["sha256"]:

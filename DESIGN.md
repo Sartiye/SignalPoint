@@ -147,9 +147,17 @@ Recommended installation behavior:
 - On installation, reuse an existing module folder when its ID matches the
   published module. Verify existing files by hash, download only missing/different
   published files, and preserve unrelated files. Record the resulting installation
-  as managed. A different module ID, another listing's ownership, or linked paths
+  as managed. If its folder name differs, move its contents to the published
+  folder name in the same recoverable transaction. Multiple installed copies of
+  one module ID require the player to keep one copy before adoption.
+  A different module ID, another listing's ownership, or linked paths
   remain conflicts. Adoption uses the same staged replacement and rollback as
   ordinary updates; automatic discovery alone does not adopt modules.
+- Updates recognize local files that already match the incoming release, including
+  newly published paths and edits to previously managed files. Reuse those bytes
+  and include them in the new receipt. Preserve extra unpublished files. If a
+  local file conflicts with the incoming content, require Repair to replace it;
+  do not discard unpublished work during an ordinary update.
 - Restrict writes to approved module destinations and reject escaping paths or
   links. Root-folder replacements and publisher-provided install scripts are
   outside the proposed initial package format.
