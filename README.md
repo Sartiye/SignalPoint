@@ -10,6 +10,9 @@ under the [MIT license](LICENSE). The API and administration panel
 live in the separate private MBCloudflare backend. This client contains no Google
 Cloud credentials and does not import the backend package.
 
+Building another launcher? Start with the [integration docs](docs/README.md) for
+the anonymous player API, download examples and optional publisher uploads.
+
 The project is ready for early public testing. Steam launch integration and the
 installer have been tested locally; Epic and Xbox PC discovery are implemented,
 but launching with those actual store installations still needs player testing.
