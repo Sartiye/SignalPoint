@@ -171,6 +171,11 @@ Recommended installation behavior:
 - Restrict writes to approved module destinations and reject escaping paths or
   links. Root-folder replacements and publisher-provided install scripts are
   outside the proposed initial package format.
+- Use extended-length Windows filesystem paths internally for transactions,
+  module files and download caches. Staging adds enough path components for
+  Napoleonic Warfare's published files to cross MAX_PATH even in a standard Steam
+  installation. Keep game settings, receipts and manifest paths in their existing
+  format; no machine-wide long-path setting is required.
 - Preserve unrelated files and identify local modifications before replacement
   or removal.
 

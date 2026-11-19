@@ -21,6 +21,7 @@ from signalpoint.manifest import (
     safe_path,
     validate_manifest,
 )
+from signalpoint.paths import filesystem_path
 
 
 def atomic_json(path, value):
@@ -59,9 +60,9 @@ def copy_tree(source, destination):
 class Manager:
     def __init__(self, state, game, api, *, process_check=bannerlord.running):
         self.state, self.game, self.api = state, bannerlord.validate_game(game), api
-        self.modules = self.game / "Modules"
-        self.work = self.game / ".signalpoint" / "transactions"
-        self.cache = state.directory / "downloads"
+        self.modules = filesystem_path(self.game / "Modules")
+        self.work = filesystem_path(self.game / ".signalpoint" / "transactions")
+        self.cache = filesystem_path(state.directory / "downloads")
         self.process_check = process_check
         self.lock = FileLock(str(state.directory / "manager.lock"), timeout=1)
         self.game_lock = FileLock(str(self.work.parent / "manager.lock"), timeout=1)

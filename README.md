@@ -36,7 +36,12 @@ Downloads go directly from object storage; a [SHA-256 checksum](https://mb-cloud
 is available for the current installer. Run a newer installer over an existing
 installation to upgrade while keeping your settings and installed mods.
 
-Version 0.1.5 adds resumable 500 MiB upload parts for files larger than 500 MiB,
+Version 0.1.6 fixes WinError 3 caused by long Windows staging paths, including
+Napoleonic Warfare in a standard Steam installation. Module files and download
+caches use long-path-safe filesystem paths without requiring a Windows policy
+or registry change.
+
+Publisher files larger than 500 MiB use resumable 500 MiB upload parts,
 up to the existing 5 GiB per-file limit. Completed parts are reused after an
 interruption or app restart. Only the unfinished part needs to be sent again.
 Parts stream in small buffers, keeping memory use low. Publishing progress shows
@@ -153,6 +158,15 @@ in place. Differing local edits require Repair before replacement.
 
 This is current mod distribution, not a release archive. Obsolete file content
 can be removed after a grace period while hashes, metadata, and reports remain.
+
+### Windows path errors
+
+Version 0.1.5 can report WinError 3 while preparing mods with deeply nested files,
+including Napoleonic Warfare v1.2.61. The temporary transaction directory adds
+characters to the path: a file that fits in the game's Modules folder can exceed
+Windows' traditional path limit during staging, even under a standard Steam install.
+Version 0.1.6 uses extended-length Windows paths for staging, module I/O and
+download-cache files without requiring a system policy or registry change.
 
 ## Validate and build
 

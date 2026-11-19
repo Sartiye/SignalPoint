@@ -10,6 +10,7 @@ from urllib.parse import quote, urljoin, urlsplit
 import httpx
 
 from signalpoint.manifest import CHUNK, ModError, hashes, validate_manifest, validate_upload_sizes
+from signalpoint.paths import filesystem_path
 
 DEFAULT_API_URL = "https://mb-cloudflare.ey.r.appspot.com/signalpoint"
 TRANSIENT_HTTP = {408, 429, 500, 502, 503, 504}
@@ -179,6 +180,7 @@ class Api:
             self._tickets[(build, sha)] = (time.monotonic(), ticket)
 
     def download(self, build, entry, target: Path, control, progress):
+        target = filesystem_path(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.is_file() and target.stat().st_size == entry["size"]:
             if hashes(target)[0] == entry["sha256"]:
